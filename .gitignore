@@ -1,0 +1,8 @@
+# Build output
+/build/
+/NX-torrent-player.nro
+/.updatetest/
+/NX-torrent-player.elf
+/NX-torrent-player.nacp
+/pctest/enginetest
+*.o
