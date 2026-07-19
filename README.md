@@ -22,6 +22,19 @@ and your library, addons and sources are included too.
 - **Local torrents** — drop `.torrent` files on the SD card (/switch/NX-torrent-player/torrents/) and play them.
 - **borealis** UI: Horizon look, controller-first, touch works too.
 
+## Screenshots
+
+<table>
+  <tr>
+    <td><img src="assets/image1.webp" alt="Local torrents tab" width="100%"></td>
+    <td><img src="assets/image2.webp" alt="Stremio library" width="100%"></td>
+  </tr>
+  <tr>
+    <td><img src="assets/image4.webp" alt="Episode picker" width="100%"></td>
+    <td><img src="assets/image3.webp" alt="Player" width="100%"></td>
+  </tr>
+</table>
+
 ## Install
 
 1. Download `NX-torrent-player.nro` from the [releases](../../releases), or
