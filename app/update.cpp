@@ -16,7 +16,7 @@
 #define APP_VERSION "0.0.0"
 #endif
 #ifndef UPDATE_API_URL
-#define UPDATE_API_URL "https://api.github.com/repos/unset/unset/releases/latest"
+#define UPDATE_API_URL "https://api.github.com/repos/shodowlo/NX-torrent-player/releases/latest"
 #endif
 
 namespace update
