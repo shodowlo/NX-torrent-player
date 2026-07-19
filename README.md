@@ -1,4 +1,4 @@
-![NX-torrent-player logo](https://github.com/shodowlo/NX-torrent-player/blob/main/assets/NX-torrent-player-stremio.png?raw=true)
+<img src="https://github.com/shodowlo/NX-torrent-player/blob/main/assets/NX-torrent-player-stremio.png?raw=true" alt="NX-torrent-player logo" width="400">
 # NX Torrent Player
 
 **NX Torrent Player: Stremio on Nintendo Switch**
