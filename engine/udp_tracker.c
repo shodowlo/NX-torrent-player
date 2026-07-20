@@ -124,7 +124,7 @@ int udp_announce(const char *url, const uint8_t info_hash[20],
                            ctxid, ACTION_CONNECT);
     if (rc != 0) {
         close(sock);
-        set_err(err, errlen, rc == -2 ? "tracker: erreur connect" : "no connect reply");
+        set_err(err, errlen, rc == -2 ? "tracker: connect error" : "no connect reply");
         return -1;
     }
     uint64_t connection_id = ((uint64_t)get32(cresp + 8) << 32) | get32(cresp + 12);
@@ -153,7 +153,7 @@ int udp_announce(const char *url, const uint8_t info_hash[20],
                        atxid, ACTION_ANNOUNCE);
     close(sock);
     if (rc != 0) {
-        set_err(err, errlen, rc == -2 ? "tracker: erreur announce" : "no announce reply");
+        set_err(err, errlen, rc == -2 ? "tracker: announce error" : "no announce reply");
         return -1;
     }
 

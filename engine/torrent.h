@@ -54,6 +54,28 @@ int torrent_load(torrent_meta *t, const char *path, char *err, size_t errlen);
 extern volatile int torrent_meta_peers_tried;
 extern volatile int torrent_meta_peers_total;
 
+// Coarse phase of the magnet metadata fetch, so the debug overlay can say which
+// step is stuck (the tracker announce in particular is otherwise invisible: it
+// runs before the peer count is even known). Written by the loader thread, read
+// racily by the UI, which stringifies it via torrent_meta_state_str().
+enum {
+    META_IDLE = 0,
+    META_PARSE,      // parsing the magnet URI
+    META_ANNOUNCE,   // asking the trackers for peers
+    META_FETCH,      // BEP 9 metadata fetch across the announced peers
+    META_BUILD,      // parsing the fetched info dict into a torrent_meta
+    META_DONE,
+    META_FAIL,
+};
+extern volatile int torrent_meta_state;
+extern volatile int torrent_meta_trackers;   // trackers listed in the magnet
+extern volatile int torrent_meta_connected;  // peers the fetch got a socket to
+// Last peer-level failure reason seen during the fetch (why a peer didn't yield
+// the metadata). Racy: copied under the fetch lock, read without one -- a torn
+// read only garbles one frame. Never write it from the UI.
+const char *torrent_meta_state_str(int state);
+extern char torrent_meta_last_err[128];
+
 int torrent_load_magnet(torrent_meta *t, const char *magnet_uri,
                         char *err, size_t errlen);
 

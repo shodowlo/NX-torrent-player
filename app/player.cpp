@@ -800,7 +800,9 @@ void MpvView::buildLoadingOverlay(const std::string& title)
     auto makeColumn = [&](float w) {
         auto* l = new brls::Label();
         l->setText("");
-        l->setFontSize(18);
+        // Small: the WORKERS list alone is ~17 lines and ran off the bottom of
+        // the screen at a larger size.
+        l->setFontSize(14);
         l->setTextColor(nvgRGB(235, 235, 235));
         l->setIsWrapping(true);
         l->setWidth(w);
@@ -829,7 +831,7 @@ void MpvView::updateLoadingOverlay()
         if (statusLabel && total > 0)
         {
             char b[96];
-            std::snprintf(b, sizeof(b), "Metadonnees : peer %d / %d", tried,
+            std::snprintf(b, sizeof(b), "Metadata: peer %d / %d", tried,
                           total);
             statusLabel->setText(b);
         }
@@ -939,18 +941,32 @@ void MpvView::updateInfoOverlay()
     if (!tfs)
     {
         infoLastSample = now;
+        int state = torrent_meta_state;
         int tried = torrent_meta_peers_tried;
         int total = torrent_meta_peers_total;
+        int conn  = torrent_meta_connected;
+        int trk   = torrent_meta_trackers;
+
+        // Elapsed in the current fetch, reset when a fresh one starts (state
+        // rewinds to parse/announce). Single player at a time, so a static is
+        // enough and needs no header field.
+        static std::chrono::steady_clock::time_point metaStart = now;
+        static int lastState = -1;
+        if (state != lastState && state <= META_ANNOUNCE)
+            metaStart = now;
+        lastState   = state;
+        int elapsed = (int)std::chrono::duration<double>(now - metaStart).count();
+
         char m[512];
         std::snprintf(m, sizeof(m),
-                      "METADATA\n"
-                      "Fetching from peers (BEP 9)\n"
-                      "Peers tried: %d / %d\n"
-                      "%s",
-                      tried, total,
-                      total == 0 ? "Announcing to trackers..."
-                                 : "First peer to answer wins; 8 are asked at "
-                                   "once.");
+                      "METADATA FETCH\n"
+                      "State: %s\n"
+                      "Elapsed: %d s   Trackers: %d\n"
+                      "Peers: tried %d / %d   reachable %d\n"
+                      "Last peer error: %s",
+                      torrent_meta_state_str(state), elapsed, trk, tried, total,
+                      conn,
+                      torrent_meta_last_err[0] ? torrent_meta_last_err : "-");
         infoLabel->setText(m);
         if (infoLabel2) infoLabel2->setText("");
         return;
@@ -1104,7 +1120,73 @@ void MpvView::updateInfoOverlay()
                   lastErr[0] ? lastErr : "-");
     infoLabel->setText(text);
 
-    char right[768];
+    // HEADER: the critical head/tail pieces mpv needs before playback -- the
+    // ones fetched during "Downloading header..." (the container's moov atom
+    // lives at both ends). Shows each one's live status so a stalled start is
+    // visible. Counts mirror the engine's CRIT_HEAD / CRIT_TAIL; wlo is the
+    // file's first absolute piece, so file-relative index i maps to wlo + i.
+    auto pieceStat = [&](int64_t idx) -> std::string {
+        int st = -1, have = 0, req = 0, nbtot = 0;
+        torrentfs_piece_debug(tfs, idx, &st, &have, &req, &nbtot);
+        switch (st)
+        {
+            case 2: return "ok";     // DONE
+            case 3: return "wr";     // WRITING
+            case 1:                  // ACTIVE: blocks in hand / total
+            {
+                char b[16];
+                std::snprintf(b, sizeof(b), "%d/%d", have, nbtot);
+                return b;
+            }
+            case 0: return "wait";   // NEEDED
+            default: return "-";
+        }
+    };
+    int critHead = 2, critTail = 3;
+    torrentfs_crit(tfs, &critHead, &critTail);
+    std::string hdr;
+    char hb[64];
+    for (int i = 0; i < critHead && i < total; i++)
+    {
+        std::snprintf(hb, sizeof(hb), "%s#%d %s", i ? "  " : "head ", i,
+                      pieceStat(wlo + i).c_str());
+        hdr += hb;
+    }
+    hdr += "\n";
+    for (int i = 0; i < critTail; i++)
+    {
+        int64_t rel = total - critTail + i;
+        if (rel < critHead) continue;   // tiny file: don't repeat the head
+        std::snprintf(hb, sizeof(hb), "%s#%lld %s", i ? "  " : "tail ",
+                      (long long)rel, pieceStat(wlo + rel).c_str());
+        hdr += hb;
+    }
+
+    // DOWNLOADING: the pieces being assembled right now (claimed + in flight),
+    // sorted by index, each with blocks-in-hand / total. File-relative indices
+    // (idx - wlo) so they line up with the HEADER list above.
+    int64_t aidx[16];
+    int ahave[16], atot[16];
+    int an = torrentfs_active_pieces(tfs, aidx, ahave, atot, 16);
+    for (int i = 0; i < an; i++)          // insertion sort by index (<=16)
+        for (int j = i + 1; j < an; j++)
+            if (aidx[j] < aidx[i])
+            {
+                int64_t ti = aidx[i]; aidx[i] = aidx[j]; aidx[j] = ti;
+                int th = ahave[i]; ahave[i] = ahave[j]; ahave[j] = th;
+                int tt = atot[i]; atot[i] = atot[j]; atot[j] = tt;
+            }
+    std::string dl;
+    char db[48];
+    for (int i = 0; i < an; i++)
+    {
+        std::snprintf(db, sizeof(db), "%s#%lld %d/%d", i ? "  " : "",
+                      (long long)(aidx[i] - wlo), ahave[i], atot[i]);
+        dl += db;
+    }
+    if (dl.empty()) dl = "-";
+
+    char right[1536];
     std::snprintf(right, sizeof(right),
                   "VIDEO\n"
                   "%lldx%lld @ %.3f fps\n"
@@ -1117,14 +1199,21 @@ void MpvView::updateInfoOverlay()
                   "%.2f GB  %lld pieces of %lld KB\n"
                   "\n"
                   "METADATA\n"
-                  "Peers tried: %d / %d",
+                  "Peers tried: %d / %d\n"
+                  "\n"
+                  "HEADER\n"
+                  "%s\n"
+                  "\n"
+                  "DOWNLOADING\n"
+                  "%s",
                   (long long)w, (long long)h, fps,
                   hw, (long long)drop, (long long)decDrop,
                   (double)ramBytes / (1024.0 * 1024.0),
                   torrentfs_name(tfs),
                   (double)torrentfs_size(tfs) / (1024.0 * 1024.0 * 1024.0),
                   (long long)total, (long long)(plen / 1024),
-                  torrent_meta_peers_tried, torrent_meta_peers_total);
+                  torrent_meta_peers_tried, torrent_meta_peers_total,
+                  hdr.c_str(), dl.c_str());
     if (infoLabel2) infoLabel2->setText(right);
 
     if (hwdec)
@@ -1419,6 +1508,11 @@ void MpvView::draw(NVGcontext* vg, float x, float y, float width, float height,
     if (!renderCtx)
     {
         updateLoadingOverlay();
+        // This IS the metadata-fetch / engine-opening phase -- the one most
+        // likely to hang -- so the ZR panel has to be fed here too. The normal
+        // update() call is past the early return below and never ran during it,
+        // which left the toggled-on overlay an empty transparent box.
+        updateInfoOverlay();
         brls::Box::draw(vg, x, y, width, height, style, ctx);
         return;
     }

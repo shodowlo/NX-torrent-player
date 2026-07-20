@@ -170,7 +170,7 @@ int torrent_load_from_metadata(torrent_meta *t, uint8_t *metadata, size_t len,
 
     if (t->tracker_count == 0) {
         torrent_unload(t);
-        set_err(err, errlen, "magnet sans tracker utilisable");
+        set_err(err, errlen, "magnet without a usable tracker");
         return -1;
     }
     return 0;
@@ -181,6 +181,22 @@ int torrent_load_from_metadata(torrent_meta *t, uint8_t *metadata, size_t len,
 // stale count for one frame, which is not worth a lock.
 volatile int torrent_meta_peers_tried = 0;
 volatile int torrent_meta_peers_total = 0;
+volatile int torrent_meta_state       = META_IDLE;
+volatile int torrent_meta_trackers    = 0;
+volatile int torrent_meta_connected   = 0;
+char torrent_meta_last_err[128]       = {0};
+
+const char *torrent_meta_state_str(int state) {
+    switch (state) {
+        case META_PARSE:    return "parsing magnet";
+        case META_ANNOUNCE: return "announcing to trackers";
+        case META_FETCH:    return "fetching metadata (BEP 9)";
+        case META_BUILD:    return "building torrent";
+        case META_DONE:     return "done";
+        case META_FAIL:     return "failed";
+        default:            return "idle";
+    }
+}
 
 // How many peers we ask for the metadata at once.
 //
@@ -227,8 +243,22 @@ static void meta_worker(void *arg) {
         size_t len = 0;
         char e[128];
         if (peer_fetch_metadata(c->peers[i], c->info_hash, c->peer_id, &md, &len,
-                                e, sizeof(e)) != 0)
+                                e, sizeof(e)) != 0) {
+            // A peer that answered the SYN but did not yield the metadata is
+            // reachable -- worth separating from the dead majority so the panel
+            // can say "peers connect but refuse" vs "nothing is reachable".
+            bool dead = strcmp(e, "connection refused") == 0 ||
+                        strcmp(e, "socket") == 0;
+            mutexLock(&c->lock);
+            if (!dead) torrent_meta_connected++;
+            snprintf(torrent_meta_last_err, sizeof(torrent_meta_last_err),
+                     "%s", e);
+            mutexUnlock(&c->lock);
             continue;
+        }
+        mutexLock(&c->lock);
+        torrent_meta_connected++;   // it handshaked and served the metadata
+        mutexUnlock(&c->lock);
 
         mutexLock(&c->lock);
         bool first = c->metadata == NULL;
@@ -255,14 +285,24 @@ int torrent_load_magnet_peers(torrent_meta *t, const char *magnet_uri,
     if (out_n) *out_n = 0;
     memset(t, 0, sizeof(*t));
 
+    torrent_meta_state     = META_PARSE;
+    torrent_meta_trackers  = 0;
+    torrent_meta_connected = 0;
+    torrent_meta_peers_tried = torrent_meta_peers_total = 0;
+    torrent_meta_last_err[0] = 0;
+
     magnet_info m;
-    if (magnet_parse(magnet_uri, &m, err, errlen) != 0)
+    if (magnet_parse(magnet_uri, &m, err, errlen) != 0) {
+        torrent_meta_state = META_FAIL;
         return -1;
+    }
     if (m.tracker_count == 0) {
         magnet_free(&m);
+        torrent_meta_state = META_FAIL;
         set_err(err, errlen, "magnet has no tracker (DHT bootstrap not supported yet)");
         return -1;
     }
+    torrent_meta_trackers = m.tracker_count;
 
     // Announce with a temporary stub (info_hash + borrowed trackers) to find
     // peers, before we know piece counts or size.
@@ -273,14 +313,17 @@ int torrent_load_magnet_peers(torrent_meta *t, const char *magnet_uri,
     stub.tracker_count = m.tracker_count;
     stub.total_len = 0;
 
+    torrent_meta_state = META_ANNOUNCE;
     peer_addr peers[80];
     int n = torrent_announce(&stub, peers, 80, err, errlen);
     // stub trackers are borrowed from the magnet; do not unload it.
     if (n <= 0) {
         magnet_free(&m);
+        torrent_meta_state = META_FAIL;
         set_err(err, errlen, "no peer to fetch metadata from");
         return -1;
     }
+    torrent_meta_state = META_FETCH;
 
     uint8_t peer_id[20];
     memcpy(peer_id, "-SW0001-", 8);
@@ -327,9 +370,11 @@ int torrent_load_magnet_peers(torrent_meta *t, const char *magnet_uri,
     size_t meta_len   = fetch.meta_len;
     if (!metadata) {
         magnet_free(&m);
+        torrent_meta_state = META_FAIL;
         set_err(err, errlen, "no peer provided the metadata");
         return -1;
     }
+    torrent_meta_state = META_BUILD;
 
     // Hand the peers on: the caller is about to want exactly these, and asking
     // the trackers again for the same list costs a round-trip with nothing to
@@ -343,6 +388,7 @@ int torrent_load_magnet_peers(torrent_meta *t, const char *magnet_uri,
     int rc = torrent_load_from_metadata(t, metadata, meta_len, m.info_hash,
                                         m.trackers, m.tracker_count, err, errlen);
     magnet_free(&m);
+    torrent_meta_state = rc == 0 ? META_DONE : META_FAIL;
     return rc;
 }
 

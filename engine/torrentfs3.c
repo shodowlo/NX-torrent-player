@@ -68,6 +68,14 @@
 #define IDLE_SECS        130    // handshaked, nothing received (see header)
 #define KEEPALIVE_SECS   60
 #define STALL_SECS       6      // requested blocks but nothing came: drop peer
+// A peer can dodge STALL_SECS forever by dribbling one block every few seconds:
+// last_block keeps resetting while the piece it holds never lands. So also cull
+// on the piece's delivered *rate* once it has held the claim a while -- tighter
+// when the player is blocked on that exact piece. The floor is deliberately low
+// so only genuine laggards are cut, not a merely slow (but healthy) swarm.
+#define SLOW_PIECE_SECS  12          // grace before a claim's rate is judged
+#define SLOW_CRIT_SECS   5           // ... shorter for the piece the reader waits on
+#define SLOW_MIN_BPS     (24 * 1024) // sustained below this on its claim: drop
 
 #define DEPTH            48     // fixed request pipeline, in blocks (~768 KB)
 
@@ -81,9 +89,17 @@
 #define STREAM_WINDOW    (32LL * 1024 * 1024)
 #define STREAM_MIN_PIECES 8
 
-// Startup criticals: mpv probes the container head and tail (moov atom) first.
-#define CRIT_HEAD        2
-#define CRIT_TAIL        3
+// Startup criticals: mpv probes the container head and tail (moov atom) first,
+// so we speculatively pre-fetch both ends in parallel rather than let mpv's
+// blocking reads discover them one seek at a time. Budgeted in BYTES, not
+// pieces: it is a latency hedge over the region mpv is about to read, so with a
+// 64 MB piece one piece already covers it -- pre-fetching a fixed 3 tail pieces
+// there was 192 MB of speculation. The piece count is ceil(budget / piece_len),
+// clamped so tiny pieces do not explode and every torrent still probes >=1 each.
+#define CRIT_HEAD_BYTES  (1LL << 20)   // ~1 MB at the head (ftyp / start)
+#define CRIT_TAIL_BYTES  (4LL << 20)   // ~4 MB at the tail (where moov usually is)
+#define CRIT_HEAD_MAX    2
+#define CRIT_TAIL_MAX    3
 
 // FAT32 caps a file at 4 GB: the cache is chunked.
 #define CACHE_CHUNK      (1LL << 30)
@@ -151,6 +167,8 @@ typedef struct {
     int64_t claim;      // piece being fetched, -1 = none
     int out_n;          // block requests outstanding
     u64 started, last_rx, last_block, last_ka;
+    u64 claim_at;       // when the current claim was taken (for the slow cull)
+    int64_t claim_bytes;// piece bytes delivered since claim_at
 } sess;
 
 typedef struct {
@@ -165,6 +183,7 @@ struct torrentfs {
     int64_t stream_offset, stream_size;
     int64_t file_first_piece, file_last_piece;
     int blocks_per_piece;      // of a full piece
+    int crit_head, crit_tail;  // startup pieces to pre-fetch at each end
 
     // FAT32-chunked cache (see v2 for the append-only rationale).
     int chunks[CACHE_MAX_CHUNKS];
@@ -754,6 +773,14 @@ static void calc_window(torrentfs *t, int64_t *ph, int64_t *lo, int64_t *hi) {
     t->st_win_ph = p; t->st_win_lo = flo; t->st_win_hi = h;
 }
 
+// The header/moov probe pieces (the ends of the file). These are fetched
+// speculatively at startup and must not be preempted when the playhead moves --
+// mpv still needs them to demux even after it seeks to a resume position.
+static bool is_critical(torrentfs *t, int64_t idx) {
+    return idx < t->file_first_piece + t->crit_head ||
+           idx > t->file_last_piece - t->crit_tail;
+}
+
 // Can this session take piece idx? NEEDED needs a free buffer; a parked
 // ACTIVE entry is adopted with its progress.
 static bool try_claim(torrentfs *t, sess *s, int sid, int64_t idx) {
@@ -776,7 +803,8 @@ static bool try_claim(torrentfs *t, sess *s, int sid, int64_t idx) {
     a->owner = sid;
     s->claim = idx;
     s->out_n = 0;
-    s->last_block = armGetSystemTick();
+    s->last_block = s->claim_at = armGetSystemTick();
+    s->claim_bytes = 0;   // rate is measured over this claim only
     return true;
 }
 
@@ -787,10 +815,10 @@ static void claim_piece(torrentfs *t, sess *s, int sid) {
     calc_window(t, &ph, &lo, &hi);
     int64_t fhi = t->file_last_piece;
 
-    if (ph <= lo + CRIT_HEAD) {   // startup: tail (moov) then head
-        for (int64_t i = fhi; i > fhi - CRIT_TAIL && i >= lo; i--)
+    if (ph <= lo + t->crit_head) {   // startup: tail (moov) then head
+        for (int64_t i = fhi; i > fhi - t->crit_tail && i >= lo; i--)
             if (try_claim(t, s, sid, i)) { t->st_claim_ok++; return; }
-        for (int64_t i = lo; i < lo + CRIT_HEAD && i <= fhi; i++)
+        for (int64_t i = lo; i < lo + t->crit_head && i <= fhi; i++)
             if (try_claim(t, s, sid, i)) { t->st_claim_ok++; return; }
     }
     for (int64_t i = ph; i < hi; i++)
@@ -906,6 +934,7 @@ static void sess_msg(torrentfs *t, sess *s, int sid, uint8_t id, uint8_t *pl,
 
             t->st_bytes_recv += dlen;
             s->last_block = now;
+            s->claim_bytes += dlen;
             if (s->out_n > 0) s->out_n--;
 
             // Stored by piece, not by owner: a parked piece's stragglers (or
@@ -1029,6 +1058,30 @@ static void netloop_main(void *arg) {
                     sess_close(t, s, true);
                     continue;
                 }
+                // Delivering, but far too slowly: it dribbles blocks so STALL
+                // never fires, yet the piece it holds crawls. Judge its rate on
+                // the current claim after a grace window (shorter when the reader
+                // is blocked on this very piece) and drop laggards -- park keeps
+                // the blocks it did send, so a faster peer resumes them. Only
+                // when we have another live session to take over, so we never
+                // strand the piece on our last peer.
+                if (s->claim >= 0 && s->out_n > 0 && t->st_live > 1) {
+                    bool waited_on = (s->claim == t->playhead_piece);
+                    u64  deadline  = (u64)(waited_on ? SLOW_CRIT_SECS
+                                                     : SLOW_PIECE_SECS) * t->freq;
+                    u64  held      = now - s->claim_at;
+                    if (held > deadline) {
+                        double secs = (double)held / (double)t->freq;
+                        double bps  = secs > 0 ? (double)s->claim_bytes / secs : 0;
+                        if (bps < SLOW_MIN_BPS) {
+                            t->st_fetch_fail++;
+                            set_err(t, "slow peer, piece %lld",
+                                    (long long)s->claim);
+                            sess_close(t, s, true);
+                            continue;
+                        }
+                    }
+                }
                 // Keep-alive: raw 4 zero bytes, only when the tx queue is
                 // empty (an atomic small send cannot interleave mid-message).
                 if (!s->connecting && s->nb.handshaked &&
@@ -1056,6 +1109,39 @@ static void netloop_main(void *arg) {
             while (t->st_live < DIAL_STOP_LIVE && connecting < MAX_CONNECTING) {
                 if (!sess_dial(t, now)) break;
                 connecting++;
+            }
+
+            // Seek preemption: if the playhead has moved so a session's piece is
+            // no longer in the streaming window, drop that claim so the session
+            // re-targets the new window instead of finishing a piece the player
+            // has moved away from. The classic case is a resumed video: mpv
+            // fetches the header, then seeks to the resume point, and without
+            // this the one session grinds through the head pieces first. Reset,
+            // not park: it frees the buffer for the re-claim (parking would hold
+            // it and, with few buffers, stall the re-claim), and the partial
+            // blocks of a piece we abandoned are not worth keeping. Criticals
+            // (the moov probe) are exempt -- mpv needs them regardless.
+            {
+                int64_t pph, plo, phi;
+                calc_window(t, &pph, &plo, &phi);
+                (void)plo;
+                for (int i = 0; i < MAX_SESS; i++) {
+                    sess *s = &t->S[i];
+                    if (!s->active || s->claim < 0) continue;
+                    int64_t cl = s->claim;
+                    if (cl >= pph && cl < phi) continue;   // still in the window
+                    if (is_critical(t, cl)) continue;      // moov probe: keep it
+                    aq_entry *a = aq_find(t, cl);
+                    mutexLock(&t->lock);
+                    if (t->status[cl] == PIECE_ACTIVE) {
+                        t->status[cl] = PIECE_NEEDED;      // discard partial, re-DL
+                        if (a) a->idx = -1;                // release slot + buffer
+                    }
+                    mutexUnlock(&t->lock);
+                    if (a) a->owner = -1;
+                    s->claim = -1;
+                    s->out_n = 0;
+                }
             }
 
             // Claims for idle unchoked sessions, within the calm budget.
@@ -1172,6 +1258,17 @@ torrentfs *torrentfs_open_file(const char *source, const char *cache_path,
 
     t->blocks_per_piece =
         (int)((t->meta.piece_len + BLOCK_LEN - 1) / BLOCK_LEN);
+
+    // Critical pieces = ceil(budget / piece_len), clamped: one big piece already
+    // covers the probed region, so we do not pre-fetch three of them.
+    int64_t plen = t->meta.piece_len;
+    t->crit_head = (int)((CRIT_HEAD_BYTES + plen - 1) / plen);
+    t->crit_tail = (int)((CRIT_TAIL_BYTES + plen - 1) / plen);
+    if (t->crit_head < 1) t->crit_head = 1;
+    if (t->crit_head > CRIT_HEAD_MAX) t->crit_head = CRIT_HEAD_MAX;
+    if (t->crit_tail < 1) t->crit_tail = 1;
+    if (t->crit_tail > CRIT_TAIL_MAX) t->crit_tail = CRIT_TAIL_MAX;
+
     t->status = calloc(1, (size_t)t->meta.piece_count);
 
     int64_t n_aq = RAM_BUDGET / t->meta.piece_len;
@@ -1515,6 +1612,28 @@ void torrentfs_debug_counts(const torrentfs *tfs, int out[10]) {
 
 int64_t torrentfs_piece_len(const torrentfs *tfs) {
     return tfs->meta.piece_len;
+}
+
+void torrentfs_crit(const torrentfs *tfs, int *head, int *tail) {
+    if (head) *head = tfs->crit_head;
+    if (tail) *tail = tfs->crit_tail;
+}
+
+int torrentfs_active_pieces(const torrentfs *tfs, int64_t *idx, int *have,
+                            int *total, int max) {
+    torrentfs *t = (torrentfs *)tfs;
+    int n = 0;
+    mutexLock(&t->lock);
+    for (int i = 0; i < t->n_aq && n < max; i++) {
+        aq_entry *a = &t->aq[i];
+        if (a->idx < 0) continue;           // free slot
+        if (idx)   idx[n]   = a->idx;
+        if (have)  have[n]  = a->have_cnt;
+        if (total) total[n] = a->nblocks;
+        n++;
+    }
+    mutexUnlock(&t->lock);
+    return n;
 }
 
 const char *torrentfs_name(const torrentfs *tfs) {

@@ -110,7 +110,7 @@ int magnet_parse(const char *uri, magnet_info *m, char *err, size_t errlen) {
     free(query);
 
     if (!have_hash) {
-        set_err(err, errlen, "magnet sans info hash valide");
+        set_err(err, errlen, "magnet without a valid info hash");
         magnet_free(m);
         return -1;
     }

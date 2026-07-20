@@ -193,7 +193,7 @@ static int peer_handshake(peer_conn *p, const uint8_t info_hash[20],
         return -1;
     }
     if (memcmp(resp + 28, info_hash, 20) != 0) {  // same torrent?
-        set_err(err, errlen, "info_hash different");
+        set_err(err, errlen, "info_hash mismatch");
         return -1;
     }
 
@@ -506,23 +506,23 @@ int peer_fetch_metadata(peer_addr addr, const uint8_t info_hash[20],
     memcpy(hs + 28, info_hash, 20);
     memcpy(hs + 48, peer_id, 20);
     if (write_full(p, hs, HANDSHAKE_LEN) != 0) {
-        close(sock); set_err(err, errlen, "envoi handshake"); return -1;
+        close(sock); set_err(err, errlen, "handshake send failed"); return -1;
     }
     uint8_t resp[HANDSHAKE_LEN];
     if (read_full(p, resp, HANDSHAKE_LEN) != 0) {
         close(sock); set_err(err, errlen, "no handshake"); return -1;
     }
     if (memcmp(resp + 28, info_hash, 20) != 0) {
-        close(sock); set_err(err, errlen, "info_hash different"); return -1;
+        close(sock); set_err(err, errlen, "info_hash mismatch"); return -1;
     }
     if (!(resp[25] & 0x10)) {
-        close(sock); set_err(err, errlen, "peer sans extensions"); return -1;
+        close(sock); set_err(err, errlen, "peer without extensions"); return -1;
     }
 
     // Advertise ut_metadata=1 to the peer.
     static const char my_ehs[] = "d1:md11:ut_metadatai1eee";
     if (send_ext(p, 0, my_ehs, sizeof(my_ehs) - 1) != 0) {
-        close(sock); set_err(err, errlen, "envoi ext handshake"); return -1;
+        close(sock); set_err(err, errlen, "ext handshake send failed"); return -1;
     }
 
     uint8_t *payload = malloc(MAX_MSG_LEN);

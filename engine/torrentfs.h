@@ -152,6 +152,17 @@ void torrentfs_piece_debug(const torrentfs *tfs, int64_t idx, int *status,
 int torrentfs_piece_done(const torrentfs *tfs, int64_t idx);
 int64_t torrentfs_piece_len(const torrentfs *tfs);
 
+// How many pieces are speculatively pre-fetched at each end of the file at
+// startup (the container header/moov probe). Scaled to the piece size, so the
+// debug panel can label exactly which pieces the "header" phase is fetching.
+void torrentfs_crit(const torrentfs *tfs, int *head, int *tail);
+
+// The pieces currently being assembled (claimed and downloading). Fills up to
+// `max` absolute piece indices with each one's blocks-in-hand / total; returns
+// the count. For the debug panel's live "downloading" list.
+int torrentfs_active_pieces(const torrentfs *tfs, int64_t *idx, int *have,
+                            int *total, int max);
+
 // The torrent's name, for display. Never NULL.
 const char *torrentfs_name(const torrentfs *tfs);
 
