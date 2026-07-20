@@ -110,6 +110,17 @@ int torrentfs_calm(const torrentfs *tfs);
 void torrentfs_set_governor(int on);
 int  torrentfs_governor(void);
 
+// RAM streaming mode (an Options toggle, on by default): keep verified pieces
+// in a bounded RAM window instead of writing them to the SD card. Completing a
+// piece then never bursts the FAT filesystem service on the OS core, which is
+// what stutters playback at each piece boundary -- the bigger the piece, the
+// bigger the stall. The trade: nothing is persisted, and seeking back beyond
+// the window re-downloads. Read once at torrentfs_open time (a live torrent
+// keeps the mode it opened with), so set it before opening. Needs a full-RAM
+// launch: the window plus mpv's own buffers will not fit an applet's heap.
+void torrentfs_set_ram_stream(int on);
+int  torrentfs_ram_stream(void);
+
 // Thread heartbeats, indexed netloop/writer/reader/ui: how long ago (ms) each
 // probe thread last ran, and the CPU core it last ran on. The freeze episodes
 // stall several threads at once without any syscall being slow -- these say

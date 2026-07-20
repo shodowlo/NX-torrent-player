@@ -140,6 +140,8 @@ void MpvView::startEngine(const std::string& source, int fileIndex)
     auto liveFlag = this->alive;
     brls::async([this, liveFlag, source, fileIndex]() {
         char err[256] = { 0 };
+        // Latched into the engine at open; pick it up from config for this video.
+        torrentfs_set_ram_stream(config::get().ramStream ? 1 : 0);
         torrentfs* t = torrentfs_open_file(source.c_str(), APPDATA_CACHE,
                                            fileIndex, err, sizeof(err));
         std::string e = err;

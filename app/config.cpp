@@ -144,6 +144,7 @@ void load()
     cfg.logging = readBool(body, "logging", cfg.logging);
     cfg.hide4k  = readBool(body, "hide4k", cfg.hide4k);
     cfg.rateGovernor = readBool(body, "rateGovernor", cfg.rateGovernor);
+    cfg.ramStream    = readBool(body, "ramStream", cfg.ramStream);
     cfg.checkUpdates = readBool(body, "checkUpdates", cfg.checkUpdates);
     cfg.audioLang    = readStr(body, "audioLang", cfg.audioLang);
     cfg.subLang      = readStr(body, "subLang", cfg.subLang);
@@ -171,6 +172,7 @@ bool save()
                  "  \"logging\": %s,\n"
                  "  \"hide4k\": %s,\n"
                  "  \"rateGovernor\": %s,\n"
+                 "  \"ramStream\": %s,\n"
                  "  \"checkUpdates\": %s,\n"
                  "  \"audioLang\": \"%s\",\n"
                  "  \"subLang\": \"%s\",\n"
@@ -180,6 +182,7 @@ bool save()
                  cfg.tabBar == TabBar::TOP ? "top" : "left",
                  cfg.logging ? "true" : "false", cfg.hide4k ? "true" : "false",
                  cfg.rateGovernor ? "true" : "false",
+                 cfg.ramStream ? "true" : "false",
                  cfg.checkUpdates ? "true" : "false", cfg.audioLang.c_str(),
                  cfg.subLang.c_str(), cfg.subtitles ? "true" : "false");
     std::fclose(f);

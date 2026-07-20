@@ -151,7 +151,7 @@ brls::View* SettingsActivity::createContentView()
     list->addView(langHint);
 
     auto* governor = new brls::BooleanCell();
-    governor->init("Smooth download rate", cfg.rateGovernor, [](bool on) {
+    governor->init("Limit download rate", cfg.rateGovernor, [](bool on) {
         config::get().rateGovernor = on;
         config::save();
         // Takes effect immediately, even for a stream already playing.
@@ -161,15 +161,36 @@ brls::View* SettingsActivity::createContentView()
 
     auto* governorHint = new brls::Label();
     governorHint->setText(
-        "Once the playback buffer is comfortably ahead, download at a steady "
-        "pace instead of full-speed bursts — the bursts overload the console's "
-        "network core and can stutter the whole system. Streams with less "
-        "than 10 s of buffer always run at full speed.");
+        "Once the playback buffer is comfortably ahead, cap the download speed "
+        "instead of bursting at full speed — the bursts overload the console's "
+        "network core and can stutter the system. Off by default, so downloads "
+        "run full speed. Streams with less than 10 s of buffer are never "
+        "limited.");
     governorHint->setFontSize(15.0f);
     governorHint->setTextColor(nvgRGB(150, 150, 155));
     governorHint->setMargins(12.0f, 20.0f, 18.0f, 20.0f);
     governorHint->setLineHeight(1.4f);
     list->addView(governorHint);
+
+    auto* ramStream = new brls::BooleanCell();
+    ramStream->init("Stream to RAM (no SD cache)", cfg.ramStream, [](bool on) {
+        config::get().ramStream = on;
+        config::save();
+        // Latched when the engine opens, so it takes effect on the next video.
+    });
+    list->addView(ramStream);
+
+    auto* ramHint = new brls::Label();
+    ramHint->setText(
+        "Keep downloaded pieces in memory instead of writing them to the SD "
+        "card. Removes the brief stutter every time a piece finishes (the SD "
+        "write hammers the system core, worse for bigger pieces), at the cost "
+        "of no resume and a limited seek-back range. Applies to the next video.");
+    ramHint->setFontSize(15.0f);
+    ramHint->setTextColor(nvgRGB(150, 150, 155));
+    ramHint->setMargins(12.0f, 20.0f, 18.0f, 20.0f);
+    ramHint->setLineHeight(1.4f);
+    list->addView(ramHint);
 
     // ---- stremio ---------------------------------------------------------
     auto* stremioHdr = new brls::Header();

@@ -92,6 +92,16 @@
 // write never makes the player's reads wait out the whole piece.
 #define WR_SLICE         (256 * 1024)
 
+// RAM streaming mode: verified pieces are kept in a bounded RAM window instead
+// of being written to the SD card. Completing a piece then never bursts the
+// FAT filesystem service on the OS core -- the SD write is what stutters
+// playback at each piece boundary, the more so the bigger the piece. Once the
+// resident bytes pass RAM_STREAM_BUDGET the pieces furthest behind the playhead
+// are dropped; a read that lands on a dropped piece re-downloads it (the read
+// moves the playhead there, so the streaming window covers it). Sized to leave
+// the forward window plenty of seek-back slack; needs a full-RAM launch.
+#define RAM_STREAM_BUDGET (256LL << 20)
+
 #define TFS_MAX_PEERS    128
 #define BACKOFF_CONN_SECS 15
 #define BACKOFF_MAX_SECS  300
@@ -107,6 +117,12 @@ enum { PIECE_NEEDED = 0, PIECE_ACTIVE = 1, PIECE_DONE = 2, PIECE_WRITING = 3 };
 static volatile int g_governor = 1;
 void torrentfs_set_governor(int on) { g_governor = on ? 1 : 0; }
 int  torrentfs_governor(void)       { return g_governor; }
+
+// Read once per torrent at open time (like the peer id); a live torrent keeps
+// whatever mode it opened with. Set it before torrentfs_open.
+static volatile int g_ram_stream = 0;
+void torrentfs_set_ram_stream(int on) { g_ram_stream = on ? 1 : 0; }
+int  torrentfs_ram_stream(void)       { return g_ram_stream; }
 
 //-----------------------------------------------------------------------------
 // Types
@@ -157,6 +173,16 @@ struct torrentfs {
     int32_t *piece_slot;       // piece index -> cache slot, -1 = not stored
     int64_t next_slot;
     int64_t slots_per_chunk;
+
+    // RAM streaming window (ram_mode). ram_piece[idx] is the resident buffer for
+    // a verified piece, or NULL. Both the writer (store/evict) and the reader
+    // touch it under cache_lock. ram_lo is a scan cursor for the eviction sweep.
+    bool ram_mode;
+    uint8_t **ram_piece;
+    int64_t ram_budget;
+    int64_t ram_resident;
+    int64_t ram_peak;
+    int64_t ram_lo;
 
     // t->lock guards: status[] transitions shared with the writer, the writer
     // queue, buffer returns, the peer pool (shared with discovery), counters
@@ -286,6 +312,16 @@ static bool piece_loc(torrentfs *t, int64_t idx, bool alloc, int *ci,
 
 static bool cache_piece_read(torrentfs *t, int64_t idx, int64_t within,
                              void *buf, size_t len) {
+    if (t->ram_mode) {
+        // Caller (cache_read_upto) holds cache_lock, so the buffer cannot be
+        // freed by an eviction mid-copy. A dropped piece reads short, which the
+        // player path tolerates (and the read moves the playhead here, pulling
+        // the piece back into the window).
+        uint8_t *src = t->ram_piece[idx];
+        if (!src) return false;
+        memcpy(buf, src + within, len);
+        return true;
+    }
     int ci;
     int64_t co;
     if (!piece_loc(t, idx, false, &ci, &co)) return false;
@@ -318,6 +354,49 @@ static size_t cache_read_upto(torrentfs *t, int64_t off, void *buf, size_t len) 
         p += n; off += (int64_t)n; len -= n;
     }
     return total;
+}
+
+//-----------------------------------------------------------------------------
+// RAM streaming window (ram_mode). Verified pieces stay in RAM rather than
+// going to the SD card, so a piece completing never bursts the FAT filesystem
+// service on the OS core. Bounded: over budget, the pieces furthest behind the
+// playhead are dropped (status DONE -> NEEDED, so a later read that lands on one
+// re-downloads it -- the read moves the playhead there, and the streaming
+// window only fetches forward, never backfilling what was intentionally
+// dropped). All state is touched under cache_lock.
+//-----------------------------------------------------------------------------
+
+// Lock order note: this takes t->lock while holding cache_lock. No path takes
+// them the other way round (the writer's SD path releases cache_lock before it
+// touches t->lock), so the nesting cannot deadlock.
+static void ram_evict(torrentfs *t) {   // caller holds t->cache_lock
+    int64_t ph = t->playhead_piece;
+    while (t->ram_resident > t->ram_budget) {
+        while (t->ram_lo < ph && !t->ram_piece[t->ram_lo]) t->ram_lo++;
+        if (t->ram_lo >= ph) break;     // nothing strictly behind left to drop
+        int64_t v = t->ram_lo;
+        free(t->ram_piece[v]);
+        t->ram_piece[v] = NULL;
+        t->ram_resident -= t->meta.piece_len;
+        mutexLock(&t->lock);
+        if (t->status[v] == PIECE_DONE) { t->status[v] = PIECE_NEEDED; t->pieces_done--; }
+        mutexUnlock(&t->lock);
+    }
+}
+
+// Move a verified piece buffer into the window, taking ownership of buf.
+static void ram_store(torrentfs *t, int64_t idx, uint8_t *buf) {
+    mutexLock(&t->cache_lock);
+    if (t->ram_piece[idx]) {            // a re-download of a still-resident piece
+        free(t->ram_piece[idx]);
+        t->ram_resident -= t->meta.piece_len;
+    }
+    t->ram_piece[idx] = buf;
+    t->ram_resident += t->meta.piece_len;
+    if (idx < t->ram_lo) t->ram_lo = idx;   // seek-back reload below the cursor
+    if (t->ram_resident > t->ram_peak) t->ram_peak = t->ram_resident;
+    ram_evict(t);
+    mutexUnlock(&t->cache_lock);
 }
 
 //-----------------------------------------------------------------------------
@@ -496,7 +575,20 @@ static void writer_main(void *arg) {
         mbedtls_sha1(j.buf, (size_t)j.plen, hash);
         bool ok = memcmp(hash, t->meta.piece_hashes + j.idx * 20, 20) == 0;
 
-        if (ok) {
+        if (ok && t->ram_mode) {
+            // No SD write at all: hand the buffer to the RAM window and mark the
+            // piece done. This is the whole point of the mode -- the per-piece
+            // FAT write that stutters playback simply never happens.
+            ram_store(t, j.idx, j.buf);
+            j.buf = NULL;                          // ownership moved to the window
+            mutexLock(&t->lock);
+            if (t->status[j.idx] != PIECE_DONE) {
+                t->status[j.idx] = PIECE_DONE;
+                t->pieces_done++;
+            }
+            t->st_piece_ok++;
+            t->st_cache_written += j.plen;
+        } else if (ok) {
             mutexLock(&t->cache_lock);
             int wci = -1;
             int64_t wco = 0;
@@ -703,8 +795,14 @@ static void claim_piece(torrentfs *t, sess *s, int sid) {
     }
     for (int64_t i = ph; i < hi; i++)
         if (try_claim(t, s, sid, i)) { t->st_claim_ok++; return; }
-    for (int64_t i = lo; i < ph; i++)
-        if (try_claim(t, s, sid, i)) { t->st_claim_ok++; return; }
+    // Backfill behind the playhead completes the whole file for the SD cache.
+    // In RAM mode there is no cache to complete and pieces behind the playhead
+    // are dropped on purpose -- refetching them would just churn the window --
+    // so stream strictly forward. A seek back re-enters the range above via the
+    // window (a read moves the playhead), which does refetch what it needs.
+    if (!t->ram_mode)
+        for (int64_t i = lo; i < ph; i++)
+            if (try_claim(t, s, sid, i)) { t->st_claim_ok++; return; }
     t->st_claim_fail++;
 }
 
@@ -1040,7 +1138,8 @@ torrentfs *torrentfs_open_file(const char *source, const char *cache_path,
 
     for (int i = 0; i < AQ_MAX; i++) t->aq[i].idx = -1;
     for (int i = 0; i < MAX_SESS; i++) t->S[i].claim = -1;
-    t->freq = armGetSystemTickFreq();
+    t->freq     = armGetSystemTickFreq();
+    t->ram_mode = g_ram_stream != 0;   // latched for this torrent's lifetime
 
     peer_addr seed_peers[80];
     int seed_count = 0;
@@ -1096,8 +1195,19 @@ torrentfs *torrentfs_open_file(const char *source, const char *cache_path,
     if (t->piece_slot)
         for (int64_t i = 0; i < t->meta.piece_count; i++) t->piece_slot[i] = -1;
     cache_delete_all(t);  // a previous run's leftovers (crash) are dead weight
-    if (!t->status || !t->piece_slot || !aq_ok ||
-        t->slots_per_chunk < 1 || cache_chunk(t, 0) < 0) {
+
+    if (t->ram_mode) {
+        t->ram_budget = RAM_STREAM_BUDGET;
+        t->ram_lo     = t->file_first_piece;
+        t->ram_piece  = calloc((size_t)t->meta.piece_count, sizeof(uint8_t *));
+    }
+    // The SD cache is only needed when not streaming into RAM: skip its file so
+    // RAM mode touches the card zero times.
+    bool cache_ok = t->ram_mode
+                        ? (t->ram_piece != NULL)
+                        : (t->piece_slot && t->slots_per_chunk >= 1 &&
+                           cache_chunk(t, 0) >= 0);
+    if (!t->status || !aq_ok || !cache_ok) {
         snprintf(err, errlen, "cache/status alloc failed");
         torrentfs_close(t);
         return NULL;
@@ -1173,6 +1283,10 @@ void torrentfs_close(torrentfs *tfs) {
         free(tfs->aq[i].buf);
         free(tfs->aq[i].have);
         free(tfs->aq[i].req);
+    }
+    if (tfs->ram_piece) {   // free before torrent_unload: needs meta.piece_count
+        for (int64_t i = 0; i < tfs->meta.piece_count; i++) free(tfs->ram_piece[i]);
+        free(tfs->ram_piece);
     }
     free(tfs->status);
     free(tfs->piece_slot);

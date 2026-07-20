@@ -28,9 +28,9 @@ struct Config
     // Which category the browser opens on.
     Tab startupTab = Tab::LOCAL;
 
-    // Sidebar (default) or a row of buttons in the header. The sidebar is the
-    // Horizon convention; the top bar gives the list the full screen width.
-    TabBar tabBar = TabBar::LEFT;
+    // A row of buttons in the header (default) or borealis' sidebar. The top bar
+    // gives the list the full screen width; the sidebar is the Horizon convention.
+    TabBar tabBar = TabBar::TOP;
 
     // Writes the log to APPDATA_LOG. Off by default: it is unbuffered and the
     // engine dumps a [stats] line every 2s, so it writes to the SD card
@@ -56,12 +56,21 @@ struct Config
     // they cost bandwidth we cannot show.
     bool hide4k = true;
 
-    // Fill-rate governor (torrentfs_set_governor): once the playback buffer
-    // is comfortably ahead, downloading is smoothed to a backlog-tied rate
-    // instead of bursting at wifi line rate — those bursts saturate the OS
-    // network core and stutter the whole console. Never limits anything while
-    // the buffer is under 10 s, so streams that struggle keep full speed.
-    bool rateGovernor = true;
+    // Download-rate limiter (torrentfs_set_governor): once the playback buffer
+    // is comfortably ahead, cap downloading to a backlog-tied rate instead of
+    // bursting at wifi line rate — those bursts saturate the OS network core and
+    // can stutter the console. Off by default: it trades download speed for
+    // network calm, and it never limits anything while the buffer is under 10 s
+    // anyway. Never touches streams that struggle to keep up.
+    bool rateGovernor = false;
+
+    // RAM streaming (torrentfs_set_ram_stream): keep verified pieces in a
+    // bounded RAM window instead of writing them to the SD card. On by default
+    // -- it removes the per-piece playback stutter (the SD write of a finished
+    // piece hammers the filesystem core, the more so the bigger the piece). The
+    // trade is that nothing is persisted and seeking far back re-downloads, and
+    // it needs a full-RAM launch. Applies to the next video.
+    bool ramStream = true;
 };
 
 // The live settings. Mutate, then call save().
