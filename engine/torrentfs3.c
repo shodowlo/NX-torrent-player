@@ -69,25 +69,31 @@
 #define KEEPALIVE_SECS   60
 #define STALL_SECS       6      // requested blocks but nothing came: drop peer
 // A peer can dodge STALL_SECS forever by dribbling one block every few seconds:
-// last_block keeps resetting while the piece it holds never lands. So also cull
-// on the piece's delivered *rate* once it has held the claim a while -- tighter
-// when the player is blocked on that exact piece. The floor is deliberately low
-// so only genuine laggards are cut, not a merely slow (but healthy) swarm.
-#define SLOW_PIECE_SECS  12          // grace before a claim's rate is judged
-#define SLOW_CRIT_SECS   5           // ... shorter for the piece the reader waits on
-#define SLOW_MIN_BPS     (24 * 1024) // sustained below this on its claim: drop
+// last_block keeps resetting while the piece it holds never lands. Rather than
+// ban it, we meter every session's receive rate (per session, so it is piece-
+// size independent) and steer the fastest peer onto the most urgent piece --
+// demoting a slow owner to a less urgent one instead of killing it. The takeover
+// only fires on a clear rate win, so a uniformly slow swarm is never thrashed.
+#define SLOW_MEASURE_SECS 5          // download time before a session's rate counts
+#define SLOW_FACTOR_CRIT  4          // take over only if this much faster than the owner
 
 #define DEPTH            48     // fixed request pipeline, in blocks (~768 KB)
 
-// RAM for in-flight piece buffers; bounds how many pieces are open at once.
+// RAM for in-flight piece buffers; bounds how many pieces are open at once. The
+// budget is in BYTES: the floor is only there to keep a tiny bit of pipelining,
+// NOT to force a piece count -- a 64 MB-piece torrent clamped to 4 buffers held
+// 256 MB of them (and 8 look-ahead pieces = 512 MB, more than the RAM window,
+// which then evicted what it had just fetched ahead and re-downloaded it).
 #define RAM_BUDGET       (48LL << 20)
 #define AQ_MAX           16
-#define AQ_MIN           4
+#define AQ_MIN           2
 
 // Streaming window: wide enough to feed the sessions, narrow enough that they
-// don't advance 50 pieces in parallel while the player starves on one.
+// don't advance 50 pieces in parallel while the player starves on one. Byte-
+// budgeted, with a small piece floor and (in RAM mode) a ceiling of half the
+// RAM window so the look-ahead can never outrun what the window can hold.
 #define STREAM_WINDOW    (32LL * 1024 * 1024)
-#define STREAM_MIN_PIECES 8
+#define STREAM_MIN_PIECES 2
 
 // Startup criticals: mpv probes the container head and tail (moov atom) first,
 // so we speculatively pre-fetch both ends in parallel rather than let mpv's
@@ -167,8 +173,12 @@ typedef struct {
     int64_t claim;      // piece being fetched, -1 = none
     int out_n;          // block requests outstanding
     u64 started, last_rx, last_block, last_ka;
-    u64 claim_at;       // when the current claim was taken (for the slow cull)
-    int64_t claim_bytes;// piece bytes delivered since claim_at
+    // Per-session receive-rate meter, for the relative slow-peer cull.
+    int64_t rx_total;   // cumulative bytes received (never reset)
+    int64_t rate_prev;  // rx_total at the last rate sample
+    u64 rate_tick;      // last rate sample (0 = meter not started yet)
+    u64 rate_start;     // first sample: start of the measure grace
+    double rate;        // smoothed receive rate, bytes/s
 } sess;
 
 typedef struct {
@@ -208,7 +218,9 @@ struct torrentfs {
     // the UI reads. Session/entry state is netloop-private and needs no lock.
     Mutex lock;
     uint8_t *status;
-    int64_t pieces_done;
+    int64_t pieces_done;       // currently resident (RAM window) / on disk (SD)
+    int64_t pieces_ever;       // distinct pieces ever completed: monotonic, for UI
+    uint8_t *ever;             // one bit per piece, already counted in pieces_ever
     int64_t playhead_piece;    // lock-free (aligned 64-bit store, see below)
     volatile bool stop;
 
@@ -567,6 +579,18 @@ static void discovery_main(void *arg) {
 // Writer: verify from RAM, one sequential (sliced) SD write, mark DONE.
 //-----------------------------------------------------------------------------
 
+// Count a piece the first time it ever completes, never again. pieces_done
+// tracks what is resident *now* (it falls when the RAM window evicts), so it is
+// the wrong number for a progress bar; this one only ever climbs. Caller holds
+// t->lock.
+static void mark_ever_done(torrentfs *t, int64_t idx) {
+    uint8_t bit = 1u << (idx & 7);
+    if (!(t->ever[idx >> 3] & bit)) {
+        t->ever[idx >> 3] |= bit;
+        t->pieces_ever++;
+    }
+}
+
 static void writer_main(void *arg) {
     torrentfs *t = arg;
     for (;;) {
@@ -605,6 +629,7 @@ static void writer_main(void *arg) {
                 t->status[j.idx] = PIECE_DONE;
                 t->pieces_done++;
             }
+            mark_ever_done(t, j.idx);
             t->st_piece_ok++;
             t->st_cache_written += j.plen;
         } else if (ok) {
@@ -632,6 +657,7 @@ static void writer_main(void *arg) {
                     t->status[j.idx] = PIECE_DONE;
                     t->pieces_done++;
                 }
+                mark_ever_done(t, j.idx);
                 t->st_piece_ok++;
                 t->st_cache_written += j.plen;
             } else {
@@ -767,6 +793,15 @@ static void calc_window(torrentfs *t, int64_t *ph, int64_t *lo, int64_t *hi) {
     if (p > fhi) p = fhi;
     int64_t win = STREAM_WINDOW / t->meta.piece_len;
     if (win < STREAM_MIN_PIECES) win = STREAM_MIN_PIECES;
+    // Never look further ahead than the RAM window can hold, or the download
+    // races ahead of the playhead, fills the budget, and evicts the very pieces
+    // it just fetched -- only to re-download them. Cap at half the window so the
+    // other half stays available for seek-back behind the playhead.
+    if (t->ram_mode) {
+        int64_t cap = (t->ram_budget / 2) / t->meta.piece_len;
+        if (cap < 1) cap = 1;
+        if (win > cap) win = cap;
+    }
     int64_t h = p + win;
     if (h > fhi + 1) h = fhi + 1;
     *ph = p; *lo = flo; *hi = h;
@@ -803,8 +838,7 @@ static bool try_claim(torrentfs *t, sess *s, int sid, int64_t idx) {
     a->owner = sid;
     s->claim = idx;
     s->out_n = 0;
-    s->last_block = s->claim_at = armGetSystemTick();
-    s->claim_bytes = 0;   // rate is measured over this claim only
+    s->last_block = armGetSystemTick();
     return true;
 }
 
@@ -934,7 +968,7 @@ static void sess_msg(torrentfs *t, sess *s, int sid, uint8_t id, uint8_t *pl,
 
             t->st_bytes_recv += dlen;
             s->last_block = now;
-            s->claim_bytes += dlen;
+            s->rx_total += dlen;
             if (s->out_n > 0) s->out_n--;
 
             // Stored by piece, not by owner: a parked piece's stragglers (or
@@ -1006,6 +1040,138 @@ static int calm_budget(torrentfs *t) {
     return budget;
 }
 
+// Refresh every session's smoothed receive rate. Metered per session (so it is
+// piece-size independent) and only WHILE actively downloading: between claims or
+// while choked the rate is frozen, not decayed -- a fast peer that just finished
+// a piece must keep its measured rate, or the steerer sees it as slow the moment
+// it goes idle and never picks it to take over. rate_start (the grace anchor)
+// persists across those pauses; a fresh session is zeroed by sess_dial's memset.
+// Run once per upkeep tick.
+static void update_rates(torrentfs *t, u64 now) {
+    for (int i = 0; i < MAX_SESS; i++) {
+        sess *s = &t->S[i];
+        if (!s->active || !s->nb.handshaked) { s->rate_tick = 0; continue; }
+        // Not downloading: pause the meter, keep rate + rate_start.
+        if (s->claim < 0 || s->nb.choked || s->out_n == 0) {
+            s->rate_tick = 0;
+            continue;
+        }
+        if (s->rate_start == 0) s->rate_start = now;   // first download: start grace
+        if (s->rate_tick == 0) {                        // (re)open the sample window
+            s->rate_prev = s->rx_total;
+            s->rate_tick = now;
+            continue;
+        }
+        double dt = (double)(now - s->rate_tick) / (double)t->freq;
+        if (dt < 0.4) continue;    // at most one sample per upkeep
+        double inst = (double)(s->rx_total - s->rate_prev) / dt;
+        if (inst < 0) inst = 0;
+        s->rate      = s->rate * 0.6 + inst * 0.4;
+        s->rate_prev = s->rx_total;
+        s->rate_tick = now;
+    }
+}
+
+// The single piece that most needs the fastest peer right now: at startup the
+// container's head/tail (the moov probe that gates the first frame), otherwise
+// the nearest not-yet-downloaded piece ahead of the playhead (what the player
+// will block on soonest). -1 if there is nothing to steer.
+static int64_t hot_piece(torrentfs *t) {
+    int64_t lo = t->file_first_piece, fhi = t->file_last_piece;
+    int64_t ph = t->playhead_piece;
+    if (ph < lo) ph = lo;
+    if (ph > fhi) ph = fhi;
+    if (ph <= lo + t->crit_head) {           // startup: head then tail
+        for (int64_t i = lo; i < lo + t->crit_head && i <= fhi; i++)
+            if (t->status[i] != PIECE_DONE && t->status[i] != PIECE_WRITING) return i;
+        for (int64_t i = fhi; i > fhi - t->crit_tail && i >= lo; i--)
+            if (t->status[i] != PIECE_DONE && t->status[i] != PIECE_WRITING) return i;
+    }
+    int64_t win = STREAM_WINDOW / t->meta.piece_len;
+    if (win < STREAM_MIN_PIECES) win = STREAM_MIN_PIECES;
+    for (int64_t i = ph; i <= ph + win && i <= fhi; i++)
+        if (t->status[i] != PIECE_DONE && t->status[i] != PIECE_WRITING) return i;
+    return -1;
+}
+
+// How urgent a piece is (lower = more urgent). At startup the head/tail moov
+// probe outranks everything (head before tail); otherwise it is the distance
+// ahead of the playhead. Index order is NOT urgency order -- the tail critical
+// has a high index but is needed before piece #1 -- so steering must compare by
+// this, not by raw index, to know which peer is on the more important piece.
+static int64_t piece_urgency(torrentfs *t, int64_t p) {
+    int64_t lo = t->file_first_piece, fhi = t->file_last_piece;
+    int64_t ph = t->playhead_piece;
+    if (ph < lo) ph = lo;
+    if (ph > fhi) ph = fhi;
+    if (ph <= lo + t->crit_head && is_critical(t, p)) {
+        if (p < lo + t->crit_head) return p - lo;   // head: 0, 1, ...
+        return t->crit_head + (fhi - p);            // tail: just after the head
+    }
+    if (p >= ph) return 1000 + (p - ph);            // ahead of the playhead
+    return 2000000 + (ph - p);                      // behind it: least urgent
+}
+
+// Put the fastest available peer on the most urgent piece, instead of banning
+// slow ones. A slow peer that grabbed the head/tail (or the piece the player is
+// about to need) first would otherwise hold up the start / the buffer while
+// faster peers work pieces further ahead. Demote-and-swap, never kill: the slow
+// peer keeps downloading, just on a less urgent piece it naturally re-claims
+// (the front is now taken by the fast peer). One swap per tick keeps it stable.
+static void steer_peers(torrentfs *t, u64 now) {
+    if (t->st_live <= 1) return;
+    int64_t hot = hot_piece(t);
+    if (hot < 0) return;
+
+    int64_t hot_u = piece_urgency(t, hot);
+    u64 grace = (u64)SLOW_MEASURE_SECS * t->freq;
+    sess *owner = NULL, *best = NULL;
+    for (int i = 0; i < MAX_SESS; i++) {
+        sess *s = &t->S[i];
+        if (!s->active || !s->nb.handshaked || s->nb.choked) continue;
+        if (s->claim == hot) { owner = s; continue; }
+        // Skip only a peer already on a MORE urgent piece -- by urgency, not by
+        // index: a peer on #1 must still be a candidate to take the tail moov.
+        if (s->claim >= 0 && piece_urgency(t, s->claim) < hot_u) continue;
+        if (!bf_has_piece(s->nb.bitfield, s->nb.bitfield_len, hot)) continue;
+        if (best == NULL || s->rate > best->rate) best = s;
+    }
+    if (!best) return;
+
+    if (owner) {
+        // Only take over on a clear win, and only once both are metered enough
+        // to trust the comparison -- otherwise leave the current owner alone.
+        // rate_start (not rate_tick) so an idle-but-fast challenger still counts:
+        // its meter is paused, but its measured rate and grace anchor persist.
+        if (best->rate_start == 0 || now - best->rate_start < grace) return;
+        if (owner->rate_start == 0 || now - owner->rate_start < grace) return;
+        if (best->rate <= owner->rate * SLOW_FACTOR_CRIT) return;
+        aq_entry *a = aq_find(t, hot);              // park hot: keep its blocks
+        if (a) aq_park(t, a);
+        owner->claim = -1;
+        owner->out_n = 0;
+    }
+    // best drops its colder piece (reset frees the buffer a NEEDED hot needs),
+    // then takes hot -- adopting the parked owner's progress if there was one.
+    if (best->claim >= 0) {
+        aq_entry *b = aq_find(t, best->claim);
+        mutexLock(&t->lock);
+        if (b && t->status[best->claim] == PIECE_ACTIVE) {
+            t->status[best->claim] = PIECE_NEEDED;
+            b->idx = -1;
+        }
+        mutexUnlock(&t->lock);
+        if (b) b->owner = -1;
+        best->claim = -1;
+        best->out_n = 0;
+    }
+    int bi = (int)(best - t->S);
+    if (try_claim(t, best, bi, hot)) {
+        fill_pipeline(t, best);
+        peer_nb_flush(&best->nb);
+    }
+}
+
 static void netloop_main(void *arg) {
     torrentfs *t = arg;
     u64 last_upkeep = 0;
@@ -1058,30 +1224,9 @@ static void netloop_main(void *arg) {
                     sess_close(t, s, true);
                     continue;
                 }
-                // Delivering, but far too slowly: it dribbles blocks so STALL
-                // never fires, yet the piece it holds crawls. Judge its rate on
-                // the current claim after a grace window (shorter when the reader
-                // is blocked on this very piece) and drop laggards -- park keeps
-                // the blocks it did send, so a faster peer resumes them. Only
-                // when we have another live session to take over, so we never
-                // strand the piece on our last peer.
-                if (s->claim >= 0 && s->out_n > 0 && t->st_live > 1) {
-                    bool waited_on = (s->claim == t->playhead_piece);
-                    u64  deadline  = (u64)(waited_on ? SLOW_CRIT_SECS
-                                                     : SLOW_PIECE_SECS) * t->freq;
-                    u64  held      = now - s->claim_at;
-                    if (held > deadline) {
-                        double secs = (double)held / (double)t->freq;
-                        double bps  = secs > 0 ? (double)s->claim_bytes / secs : 0;
-                        if (bps < SLOW_MIN_BPS) {
-                            t->st_fetch_fail++;
-                            set_err(t, "slow peer, piece %lld",
-                                    (long long)s->claim);
-                            sess_close(t, s, true);
-                            continue;
-                        }
-                    }
-                }
+                // Rate metering + strength steering run as their own passes
+                // (update_rates / steer_peers) after this loop.
+
                 // Keep-alive: raw 4 zero bytes, only when the tx queue is
                 // empty (an atomic small send cannot interleave mid-message).
                 if (!s->connecting && s->nb.handshaked &&
@@ -1092,6 +1237,9 @@ static void netloop_main(void *arg) {
                     s->last_ka = now;
                 }
             }
+
+            update_rates(t, now);   // per-session rate meter
+            steer_peers(t, now);    // fastest peer -> most urgent piece
 
             int connecting = 0, bf_empty = 0;
             for (int i = 0; i < MAX_SESS; i++) {
@@ -1270,6 +1418,7 @@ torrentfs *torrentfs_open_file(const char *source, const char *cache_path,
     if (t->crit_tail > CRIT_TAIL_MAX) t->crit_tail = CRIT_TAIL_MAX;
 
     t->status = calloc(1, (size_t)t->meta.piece_count);
+    t->ever   = calloc(1, (size_t)(t->meta.piece_count + 7) / 8);
 
     int64_t n_aq = RAM_BUDGET / t->meta.piece_len;
     if (n_aq < AQ_MIN) n_aq = AQ_MIN;
@@ -1304,7 +1453,7 @@ torrentfs *torrentfs_open_file(const char *source, const char *cache_path,
                         ? (t->ram_piece != NULL)
                         : (t->piece_slot && t->slots_per_chunk >= 1 &&
                            cache_chunk(t, 0) >= 0);
-    if (!t->status || !aq_ok || !cache_ok) {
+    if (!t->status || !t->ever || !aq_ok || !cache_ok) {
         snprintf(err, errlen, "cache/status alloc failed");
         torrentfs_close(t);
         return NULL;
@@ -1386,6 +1535,7 @@ void torrentfs_close(torrentfs *tfs) {
         free(tfs->ram_piece);
     }
     free(tfs->status);
+    free(tfs->ever);
     free(tfs->piece_slot);
     torrent_unload(&tfs->meta);
     free(tfs);
@@ -1466,7 +1616,10 @@ void torrentfs_cancel(torrentfs *tfs) {
 void torrentfs_stats(const torrentfs *tfs, int64_t *pieces_done,
                      int64_t *pieces_total, int64_t *playhead_piece) {
     mutexLock((Mutex *)&tfs->lock);
-    if (pieces_done) *pieces_done = tfs->pieces_done;
+    // pieces_ever, not pieces_done: the latter is the RAM window's current
+    // occupancy and falls back as pieces evict, so it made the progress count
+    // jump backwards. This one only climbs.
+    if (pieces_done) *pieces_done = tfs->pieces_ever;
     if (pieces_total)
         *pieces_total = tfs->file_last_piece - tfs->file_first_piece + 1;
     if (playhead_piece) *playhead_piece = tfs->playhead_piece;
