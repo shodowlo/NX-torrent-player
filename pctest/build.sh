@@ -10,7 +10,7 @@ gcc -O2 -g -Wall \
     engine/torrent.c \
     engine/udp_tracker.c \
     engine/peer.c \
-    engine/torrentfs2.c \
+    engine/torrentfs.c \
     engine/magnet.c \
     engine/dht.c \
     engine/dhtclient.c \

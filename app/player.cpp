@@ -556,7 +556,7 @@ void MpvView::buildLoadingOverlay(const std::string& title)
     loadingOverlay->addView(column);
 
     // The poster when the caller knows what we're playing, otherwise the app
-    // logo (bundled at romfs:/logo.png).
+    // logo (bundled at romfs:/NX-torrent-player-bg-rounded.png).
     auto* logo = new brls::Image();
     if (!art.posterPath.empty())
     {
@@ -565,7 +565,7 @@ void MpvView::buildLoadingOverlay(const std::string& title)
     }
     else
     {
-        logo->setImageFromRes("logo.png");
+        logo->setImageFromRes("NX-torrent-player-bg-rounded.png");
         logo->setDimensions(148.0f, 148.0f);
     }
     logo->setScalingType(brls::ImageScalingType::FIT);

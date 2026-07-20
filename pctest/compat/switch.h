@@ -110,6 +110,10 @@ static inline void svcSleepThread(u64 ns) {
     nanosleep(&ts, NULL);
 }
 
+// No real core affinity on the PC; the engine only uses this for its debug
+// heartbeat, so a constant is fine.
+static inline u32 svcGetCurrentProcessorNumber(void) { return 0; }
+
 //-----------------------------------------------------------------------------
 // Random
 //-----------------------------------------------------------------------------

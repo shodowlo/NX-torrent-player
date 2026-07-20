@@ -1,4 +1,4 @@
-<img src="https://github.com/shodowlo/NX-torrent-player/blob/main/assets/NX-torrent-player-stremio.png?raw=true" alt="NX-torrent-player logo" width="200">
+<img src="https://github.com/shodowlo/NX-torrent-player/blob/main/assets/NX-torrent-player-banner.png?raw=true" alt="NX Torrent Player" width="640">
 
 # NX Torrent Player
 

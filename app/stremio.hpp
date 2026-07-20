@@ -36,6 +36,11 @@ struct LibItem
     double timeOffsetMs = 0;  // position in videoId
     double durationMs   = 0;  // duration of videoId
 
+    // Last time the item changed on the account (ISO 8601, so it sorts
+    // lexicographically = chronologically). Watching pushes a new state, which
+    // bumps it, so sorting by it descending puts the most recently viewed first.
+    std::string mtime;
+
     // 0..1 through the last watched video, or -1 when there is nothing to show.
     double progress() const
     {

@@ -18,6 +18,7 @@
 #include <borealis/views/dialog.hpp>
 #include <borealis/views/scrolling_frame.hpp>
 
+#include <algorithm>
 #include <cstdio>
 #include <dirent.h>
 #include <sys/stat.h>
@@ -442,6 +443,7 @@ void fetchLibraryAsync(const std::string& authKey,
                     it.name   = json::str(o, "name");
                     it.type   = json::str(o, "type");
                     it.poster = json::str(o, "poster");
+                    it.mtime  = json::str(o, "_mtime");
                     // Watch state: read from the "state" object's own text, not
                     // the whole item -- the flat json scan takes the first key
                     // it finds, and an item field with the same name landing
@@ -466,6 +468,13 @@ void fetchLibraryAsync(const std::string& authKey,
                     if (it.name.empty()) { nNoName++; continue; }
                     r.items.push_back(it);
                 }
+                // Most recently viewed first: watching bumps _mtime, and the ISO
+                // timestamps compare lexicographically. Items without an _mtime
+                // (should not happen) sort to the bottom.
+                std::stable_sort(r.items.begin(), r.items.end(),
+                                 [](const LibItem& a, const LibItem& b) {
+                                     return a.mtime > b.mtime;
+                                 });
                 // Whether a short list is the account's doing or ours is not
                 // guessable from the UI, so say it plainly.
                 brls::Logger::info(

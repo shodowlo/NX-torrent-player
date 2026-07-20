@@ -52,12 +52,10 @@ pkg_check_modules(WEBP REQUIRED IMPORTED_TARGET libwebp)
 # UI (app/, C++) + our torrent engine (engine/, C).
 file(GLOB_RECURSE MAIN_SRC ${CMAKE_CURRENT_SOURCE_DIR}/app/*.cpp)
 set(ENGINE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/engine)
-# torrentfs3.c is the v3 engine (lighter: 3 threads, leech-only, one piece
-# per session with parked-claim adoption). torrentfs2.c (v2) and torrentfs.c
-# (v1) are kept in the tree for reference but not built (all three define the
-# same torrentfs.h API -- swap the file here to switch engines).
+# torrentfs.c is the streaming engine: 3 threads, leech-only, one piece per
+# session with parked-claim adoption and strength-based peer steering.
 set(ENGINE_SRC
-    ${ENGINE_DIR}/bencode.c ${ENGINE_DIR}/torrent.c ${ENGINE_DIR}/torrentfs3.c
+    ${ENGINE_DIR}/bencode.c ${ENGINE_DIR}/torrent.c ${ENGINE_DIR}/torrentfs.c
     ${ENGINE_DIR}/peer.c ${ENGINE_DIR}/swarm.c ${ENGINE_DIR}/magnet.c
     ${ENGINE_DIR}/udp_tracker.c ${ENGINE_DIR}/dht.c ${ENGINE_DIR}/dhtclient.c
     ${ENGINE_DIR}/udpdiag.c ${ENGINE_DIR}/stream.c
@@ -95,7 +93,7 @@ if (PLATFORM_SWITCH)
         COMMAND ${CMAKE_COMMAND} -E copy_directory ${PROJECT_RESOURCES} ${CMAKE_BINARY_DIR}/resources
         COMMAND ${CMAKE_COMMAND} -E remove_directory ${CMAKE_BINARY_DIR}/resources/font
         # Bundle our loading-screen logo, list icon and the Stremio mark at romfs:/.
-        COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/assets/logo.png ${CMAKE_BINARY_DIR}/resources/logo.png
+        COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/assets/NX-torrent-player-bg-rounded.png ${CMAKE_BINARY_DIR}/resources/NX-torrent-player-bg-rounded.png
         COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/assets/video-icon.png ${CMAKE_BINARY_DIR}/resources/video-icon.png
         COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/assets/stremio-icon.png ${CMAKE_BINARY_DIR}/resources/stremio-icon.png
         COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/assets/local-tab-icon.png ${CMAKE_BINARY_DIR}/resources/local-icon.png

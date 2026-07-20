@@ -649,6 +649,10 @@ brls::View* ListActivity::createContentView()
 
     auto* scroll = new brls::ScrollingFrame();
     scroll->setGrow(1.0f);
+    // CENTERED, not the default NATURAL: only CENTERED scrolls the frame to the
+    // focused row -- both on appear (so opening a started show lands on the
+    // in-progress episode even when it is far down the list) and as you navigate.
+    scroll->setScrollingBehavior(brls::ScrollingBehavior::CENTERED);
     auto* list = new brls::Box();
     list->setAxis(brls::Axis::COLUMN);
     listBox = list;
