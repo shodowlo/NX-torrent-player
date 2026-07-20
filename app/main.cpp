@@ -450,6 +450,36 @@ brls::View* buildEmptyState()
     return box;
 }
 
+// Shown on the libnx text console (NOT borealis) when the app was launched in
+// applet mode -- that mode caps the heap far below what mpv and the RAM
+// streaming window need. Done before borealis/GL is ever set up: bringing the
+// whole UI stack up only to tear it back down on exit is what crashed the
+// console in applet mode. Blocks on + then returns, so main() exits cleanly.
+static void appletModeBlock()
+{
+    consoleInit(NULL);
+    printf("\n  NX Torrent Player - full memory required\n\n");
+    printf("  This app was launched in applet mode, which caps\n");
+    printf("  memory well below what the player and its\n");
+    printf("  streaming buffer need.\n\n");
+    printf("  Launch it with full memory instead: start it over\n");
+    printf("  a game (hold R while opening the game), or use a\n");
+    printf("  forwarder.\n\n");
+    printf("  Press + to exit.\n");
+    consoleUpdate(NULL);
+
+    PadState pad;
+    padConfigureInput(1, HidNpadStyleSet_NpadStandard);
+    padInitializeDefault(&pad);
+    while (appletMainLoop())
+    {
+        padUpdate(&pad);
+        if (padGetButtonsDown(&pad) & HidNpadButton_Plus) break;
+        consoleUpdate(NULL);
+    }
+    consoleExit(NULL);
+}
+
 // The local ".torrent files on the SD card" list -- now one tab among several.
 brls::View* buildLocalTab()
 {
@@ -649,6 +679,19 @@ brls::View* buildBrowser()
 
 int main(int argc, char* argv[])
 {
+    // Applet mode caps the heap far below what mpv + the RAM streaming window
+    // need. Bail before anything is initialised (a full-RAM launch runs as an
+    // Application or SystemApplication; everything else is applet mode) -- and
+    // via the plain text console, since standing borealis/GL up just to shut it
+    // down on exit is what crashed the console here.
+    AppletType appletType = appletGetAppletType();
+    if (appletType != AppletType_Application &&
+        appletType != AppletType_SystemApplication)
+    {
+        appletModeBlock();
+        return EXIT_SUCCESS;
+    }
+
     ensureAppDataDir();
 
     config::load();
