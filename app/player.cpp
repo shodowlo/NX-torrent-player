@@ -12,6 +12,12 @@
 #include <mpv/render.h>
 #include <mpv/render_gl.h>
 
+#include <borealis/views/dialog.hpp>
+#include <borealis/views/header.hpp>
+#include <borealis/views/cells/cell_selector.hpp>
+
+#include <cctype>
+
 #include "appdata.hpp"
 #include "config.hpp"
 #include "stremio.hpp"  // cached artwork -> blurred background
@@ -184,6 +190,7 @@ bool MpvView::startMpv()
     // Switch audio output is stereo; force a proper downmix or 5.1 dialogue
     // (centre channel) is dropped.
     mpv_set_option_string(mpv, "audio-channels", "stereo");
+    mpv_set_option_string(mpv, "audio-normalize-downmix", "yes");
 
     // Preferred track languages (Options). mpv falls back to the file's default
     // track when nothing matches, so a wrong guess costs nothing.
@@ -305,6 +312,7 @@ void MpvView::registerPlayerActions()
                 mpv_set_property_string(mpv, "pause", "no");
                 if (pauseOverlay) pauseOverlay->setVisibility(brls::Visibility::GONE);
                 if (pauseTitleBox) pauseTitleBox->setVisibility(brls::Visibility::GONE);
+                if (optionsHint) optionsHint->setVisibility(brls::Visibility::GONE);
                 if (seekOverlay) seekOverlay->setVisibility(brls::Visibility::GONE);
                 return true;
             }
@@ -317,6 +325,8 @@ void MpvView::registerPlayerActions()
                 pauseOverlay->setVisibility(vis);
             if (pauseTitleBox)
                 pauseTitleBox->setVisibility(vis);
+            if (optionsHint)
+                optionsHint->setVisibility(vis);
             if (seekOverlay)
                 seekOverlay->setVisibility(vis);
             return true;
@@ -359,6 +369,146 @@ void MpvView::registerPlayerActions()
             return true;
         },
         false, false, brls::SOUND_NONE);
+
+    // X opens the audio/subtitle picker for the current video.
+    this->registerAction(
+        "Options", brls::BUTTON_X,
+        [this](brls::View*) {
+            openTrackMenu();
+            return true;
+        },
+        false, false, brls::SOUND_CLICK);
+}
+
+void MpvView::openTrackMenu()
+{
+    if (!ready || !mpv)
+        return;
+
+    // Pause behind the popup, the same state A leaves, so the video stays
+    // paused when the menu closes and A resumes it.
+    if (!userPaused && !seeking)
+    {
+        userPaused = true;
+        mpv_set_property_string(mpv, "pause", "yes");
+        if (pauseOverlay) pauseOverlay->setVisibility(brls::Visibility::VISIBLE);
+        if (pauseTitleBox) pauseTitleBox->setVisibility(brls::Visibility::VISIBLE);
+        if (optionsHint) optionsHint->setVisibility(brls::Visibility::VISIBLE);
+        if (seekOverlay) seekOverlay->setVisibility(brls::Visibility::VISIBLE);
+    }
+
+    // Human label for a track: uppercased language, then its title, else "Track N".
+    auto label = [](const std::string& lang, const std::string& title,
+                    int64_t id) {
+        std::string s = lang;
+        for (auto& c : s) c = (char)std::toupper((unsigned char)c);
+        if (!title.empty()) s += (s.empty() ? "" : " - ") + title;
+        if (s.empty()) s = "Track " + std::to_string(id);
+        return s;
+    };
+
+    // Walk mpv's track-list once, splitting audio and subtitle tracks and noting
+    // which is selected. Subtitles get an "Off" entry so the one selector both
+    // switches and disables them.
+    std::vector<std::string> aLabels, sLabels{ "Off" };
+    std::vector<int64_t> aIds, sIds{ -1 };
+    int aCur = 0, sCur = 0;  // sCur 0 = Off
+
+    mpv_node node;
+    if (mpv_get_property(mpv, "track-list", MPV_FORMAT_NODE, &node) >= 0)
+    {
+        if (node.format == MPV_FORMAT_NODE_ARRAY && node.u.list)
+            for (int i = 0; i < node.u.list->num; i++)
+            {
+                mpv_node& tn = node.u.list->values[i];
+                if (tn.format != MPV_FORMAT_NODE_MAP || !tn.u.list) continue;
+
+                std::string type, lang, title;
+                int64_t id = 0;
+                bool sel = false;
+                for (int k = 0; k < tn.u.list->num; k++)
+                {
+                    const char* key = tn.u.list->keys[k];
+                    mpv_node& v     = tn.u.list->values[k];
+                    if (!std::strcmp(key, "type") && v.format == MPV_FORMAT_STRING)
+                        type = v.u.string;
+                    else if (!std::strcmp(key, "id") && v.format == MPV_FORMAT_INT64)
+                        id = v.u.int64;
+                    else if (!std::strcmp(key, "lang") && v.format == MPV_FORMAT_STRING)
+                        lang = v.u.string;
+                    else if (!std::strcmp(key, "title") && v.format == MPV_FORMAT_STRING)
+                        title = v.u.string;
+                    else if (!std::strcmp(key, "selected") && v.format == MPV_FORMAT_FLAG)
+                        sel = v.u.flag;
+                }
+
+                if (type == "audio")
+                {
+                    if (sel) aCur = (int)aIds.size();
+                    aLabels.push_back(label(lang, title, id));
+                    aIds.push_back(id);
+                }
+                else if (type == "sub")
+                {
+                    if (sel) sCur = (int)sIds.size();
+                    sLabels.push_back(label(lang, title, id));
+                    sIds.push_back(id);
+                }
+            }
+        mpv_free_node_contents(&node);
+    }
+
+    auto* content = new brls::Box();
+    content->setAxis(brls::Axis::COLUMN);
+    content->setPadding(8.0f, 40.0f, 24.0f, 40.0f);
+    // No fixed width: the dialog frame is 720 wide and stretches its children,
+    // so leaving this auto makes the rows span the whole dialog (a fixed 580
+    // left them short of the right edge).
+
+    auto* header = new brls::Header();
+    header->setTitle("Playback");
+    content->addView(header);
+
+    if (aLabels.size() > 1)  // more than one audio track is worth a selector
+    {
+        auto* a = new brls::SelectorCell();
+        a->init("Audio", aLabels, aCur, [this, aIds](int sel) {
+            char v[24];
+            std::snprintf(v, sizeof(v), "%lld", (long long)aIds[sel]);
+            mpv_set_property_string(mpv, "aid", v);
+        });
+        content->addView(a);
+    }
+
+    if (sIds.size() > 1)  // there is at least one subtitle track besides "Off"
+    {
+        auto* s = new brls::SelectorCell();
+        s->init("Subtitles", sLabels, sCur, [this, sIds](int sel) {
+            if (sIds[sel] < 0)
+                mpv_set_property_string(mpv, "sid", "no");
+            else
+            {
+                char v[24];
+                std::snprintf(v, sizeof(v), "%lld", (long long)sIds[sel]);
+                mpv_set_property_string(mpv, "sid", v);
+            }
+        });
+        content->addView(s);
+    }
+
+    if (aLabels.size() <= 1 && sIds.size() <= 1)
+    {
+        auto* none = new brls::Label();
+        none->setText("This video has no other audio or subtitle tracks.");
+        none->setFontSize(18.0f);
+        none->setTextColor(nvgRGB(190, 190, 195));
+        none->setMargins(12.0f, 12.0f, 4.0f, 12.0f);
+        content->addView(none);
+    }
+
+    auto* dlg = new brls::Dialog(content);
+    dlg->addButton("Close", []() {});  // B also closes it (cancelable)
+    dlg->open();
 }
 
 MpvView::~MpvView()
@@ -708,9 +858,45 @@ void MpvView::buildLoadingOverlay(const std::string& title)
         tl->setFontSize(26.0f);
         tl->setTextColor(nvgRGB(255, 255, 255));
         tl->setSingleLine(true);
+        // Cap the width so a long title is cut with an ellipsis instead of
+        // running across the screen into the top-right options hint. Short
+        // titles keep their natural width (the pill shrinks to fit).
+        tl->setMaxWidth(920.0f);
         pauseTitleBox->addView(tl);
     }
     this->addView(pauseTitleBox);
+
+    // Top-right hint while paused: the X button glyph + a gear, telling the user
+    // X opens the audio/subtitle options. Same show/hide as the pause overlays.
+    optionsHint = new brls::Box();
+    optionsHint->setPositionType(brls::PositionType::ABSOLUTE);
+    optionsHint->setPositionTop(48.0f);
+    optionsHint->setPositionRight(60.0f);
+    optionsHint->setPadding(10.0f, 20.0f, 10.0f, 20.0f);
+    optionsHint->setCornerRadius(8.0f);
+    optionsHint->setBackgroundColor(nvgRGBA(0, 0, 0, 140));
+    optionsHint->setAxis(brls::Axis::ROW);
+    optionsHint->setAlignItems(brls::AlignItems::CENTER);
+    optionsHint->setVisibility(brls::Visibility::GONE);
+    {
+        auto* x = new brls::Label();
+        x->setText("");  // borealis font: the X button glyph
+        x->setFontSize(26.0f);
+        x->setTextColor(nvgRGB(255, 255, 255));
+        x->setMargins(0.0f, 12.0f, 0.0f, 0.0f);
+        optionsHint->addView(x);
+
+        // Gear from the Material Icons font bundled in romfs (settings glyph).
+        auto* gear = new brls::Label();
+        gear->setText("");
+        gear->setFontSize(26.0f);
+        gear->setTextColor(nvgRGB(255, 255, 255));
+        // Nudge it down a touch: the Material gear glyph sits high in its box and
+        // otherwise does not line up with the X button glyph next to it.
+        gear->setMargins(5.0f, 0.0f, 0.0f, 0.0f);
+        optionsHint->addView(gear);
+    }
+    this->addView(optionsHint);
 
     // Seek bar at the bottom while paused: elapsed | progress | total.
     seekOverlay = new brls::Box();

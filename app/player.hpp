@@ -86,6 +86,11 @@ class MpvView : public brls::Box
     void updateInfoOverlay();
     void updateSeekBar();
 
+    // X during playback: a modal popup to switch the current video's audio and
+    // subtitle track. Pauses playback behind it (it stays paused on close, A
+    // resumes), and reads the tracks straight off mpv.
+    void openTrackMenu();
+
     // Dumps every engine counter to the log on a fixed interval, independently
     // of the ZR panel. Single snapshots hide the shape of the problem (a rate
     // read just before it collapses looks healthy); the trend is the evidence.
@@ -110,6 +115,7 @@ class MpvView : public brls::Box
     brls::Box* pauseOverlay  = nullptr;
     brls::Box* pauseTitleBox = nullptr;  // title, top-left, shown while paused
     std::string pauseTitle;              // what it says
+    brls::Box* optionsHint   = nullptr;  // "X Options" hint, top-right while paused
     brls::Box* seekOverlay   = nullptr;
     brls::Box* seekFill      = nullptr;
     brls::Label* seekCur     = nullptr;

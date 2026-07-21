@@ -587,7 +587,8 @@ void showEpisodes(const std::string& authKey, const std::string& type,
             // Resume only in the episode the account actually stopped in.
             if ((*eps)[i].id == item.videoId)
                 watch.resumeSec = resumeFrom(item.timeOffsetMs, item.durationMs);
-            showAddons(authKey, type, (*eps)[i].id, title, epArt, watch);
+            std::string epTitle = title + " · Episode " + std::to_string((*eps)[i].episode);
+            showAddons(authKey, type, (*eps)[i].id, epTitle, epArt, watch);
         },
         art.posterPath);
     epList->setRebuildOnReturn(buildRows);
