@@ -1079,6 +1079,37 @@ void fetchCatalogAsync(const std::string& addonBase, const std::string& type,
     });
 }
 
+void fetchSearchAsync(const std::string& query,
+                      std::function<void(LibraryResult)> done)
+{
+    brls::async([query, done]() {
+        LibraryResult r;
+        r.ok         = true;
+        const char* types[] = { "theaters", "series" };
+        for (const char* type : types)
+        {
+            std::string url = std::string("https://v3-cinemeta.strem.io/catalog/") +
+                              type + "/top/search=" + http::urlEncode(query) + ".json";
+            std::string resp, err;
+            if (!http::get(url, resp, err)) continue;  // one type may fail; keep the other
+            for (const auto& o : json::objects(resp, "metas"))
+            {
+                LibItem it;
+                it.id     = json::str(o, "id");
+                it.name   = json::str(o, "name");
+                it.type   = json::str(o, "type");
+                if (it.type.empty()) it.type = type;
+                it.poster = json::str(o, "poster");
+                if (it.id.empty() || it.name.empty()) continue;
+                r.items.push_back(it);
+            }
+        }
+        brls::Logger::info("[stremio] search \"{}\" -> {} items", query,
+                           r.items.size());
+        brls::sync([done, r]() { done(r); });
+    });
+}
+
 } // namespace stremio
 
 StremioTab::StremioTab()
@@ -1242,6 +1273,26 @@ StremioTab::StremioTab()
         },
         false, false, brls::SOUND_NONE);
 
+    // Left/Right (d-pad and the analog stick, which borealis maps to them) also
+    // cycle the view -- but on the tab, not the frame: the header tab bar uses
+    // Left/Right to move between Local and Stremio, and a list has no horizontal
+    // neighbours so the directions are otherwise unused here. Hidden hints (R/L
+    // already advertise "View").
+    this->registerAction(
+        "View", brls::BUTTON_RIGHT,
+        [this](brls::View*) {
+            if (!authKey.empty() && libLoaded) cycleView(+1);
+            return true;
+        },
+        true, false, brls::SOUND_NONE);
+    this->registerAction(
+        "View", brls::BUTTON_LEFT,
+        [this](brls::View*) {
+            if (!authKey.empty() && libLoaded) cycleView(-1);
+            return true;
+        },
+        true, false, brls::SOUND_NONE);
+
     // R/L cycle Continue Watching -> Popular Movies -> Popular Shows -> Library.
     // Registered on the frame (main.cpp) via this cycler, not on the tab, so R/L
     // also work while focus is on the header tab bar (outside this view tree).
@@ -1400,17 +1451,68 @@ void StremioTab::showStatus(const std::string& msg, bool loading)
 void StremioTab::draw(NVGcontext* vg, float x, float y, float width, float height,
                       brls::Style style, brls::FrameContext* ctx)
 {
+    double t = std::chrono::duration<double>(
+                   std::chrono::steady_clock::now().time_since_epoch())
+                   .count();
+
+    // Analog stick flick cycles the view too (Left/Right buttons are actions,
+    // but the stick is an axis borealis does not turn into button presses here).
+    // Only while focus is in the list, one cycle per flick, and deferred to a
+    // safe point (rebuilding the tree mid-draw crashes).
+    if (libLoaded && !authKey.empty())
+    {
+        brls::View* f = brls::Application::getCurrentFocus();
+        if (f && libList && isUnder(f, libList))
+        {
+            brls::ControllerState cs {};
+            brls::Application::getPlatform()
+                ->getInputManager()
+                ->updateUnifiedControllerState(&cs);
+            float sx = cs.axes[brls::ControllerAxis::LEFT_X];
+            if (!stickLatched && (sx > 0.6f || sx < -0.6f))
+            {
+                stickLatched = true;
+                int dir = sx > 0 ? 1 : -1;
+                auto live = alive;
+                brls::sync([this, live, dir]() {
+                    if (*live && libLoaded && !authKey.empty()) cycleView(dir);
+                });
+            }
+            else if (sx > -0.3f && sx < 0.3f)
+                stickLatched = false;
+        }
+        else
+            stickLatched = false;
+    }
+
     if (loadingBox && loadingBar && loadingFill &&
         loadingBox->getVisibility() == brls::Visibility::VISIBLE &&
         loadingBar->getVisibility() == brls::Visibility::VISIBLE)
     {
-        double t = std::chrono::duration<double>(
-                       std::chrono::steady_clock::now().time_since_epoch())
-                       .count();
         const float track = 300.0f, seg = 90.0f;
         float phase = (float)((std::sin(t * 3.0) + 1.0) * 0.5);  // 0..1 ease
         loadingFill->setTranslationX(phase * (track - seg));
     }
+
+    // View-change slide: ease the list from an off-centre start back to x=0.
+    if (sliding && libList)
+    {
+        const double dur   = 0.22;
+        const float  slide = 520.0f;  // how far off it starts
+        double el = t - slideStart;
+        if (el >= dur)
+        {
+            sliding = false;
+            libList->setTranslationX(0.0f);
+        }
+        else
+        {
+            double p     = el / dur;
+            double eased = 1.0 - std::pow(1.0 - p, 3.0);  // ease-out cubic
+            libList->setTranslationX((float)((1.0 - eased) * slideSign * slide));
+        }
+    }
+
     brls::Box::draw(vg, x, y, width, height, style, ctx);
 }
 
@@ -1449,7 +1551,8 @@ void StremioTab::cycleView(int dir)
 {
     int n = static_cast<int>(View::COUNT);
     view  = static_cast<View>(((static_cast<int>(view) + dir) % n + n) % n);
-    resetOnShow = true;   // land on the first row, scrolled to the top
+    resetOnShow  = true;              // land on the first row, scrolled to the top
+    pendingSlide = dir > 0 ? 1 : -1;  // slide the new list in from that side
     renderView();
 }
 
@@ -1472,29 +1575,124 @@ void StremioTab::renderView()
                 double p = it.progress();
                 if (p > 0.005 && p < 0.95) cw.push_back(it);
             }
-            showItems(cw, "Continue Watching", "Nothing in progress");
+            //  history -- Material glyph in the header title.
+            showItems(cw, "  Continue Watching", "Nothing in progress");
             break;
         }
         case View::Library:
-            showItems(libItems, "Library · " + std::to_string(libItems.size()) +
-                                    " items",
+            showItems(libItems, "  Library · " +  //  bookmark
+                                    std::to_string(libItems.size()) + " items",
                       "Library is empty");
             break;
-        case View::PopularMovies:
+        case View::PopularMovies:  //  movie
             if (popMoviesLoaded)
-                showItems(popMovies, "Popular Movies", "No popular movies");
+                showItems(popMovies, "  Popular Movies", "No popular movies");
             else
-                loadCatalog("movie", popMovies, popMoviesLoaded, "Popular Movies");
+                loadCatalog("movie", popMovies, popMoviesLoaded,
+                            "  Popular Movies");
             break;
-        case View::PopularSeries:
+        case View::PopularSeries:  //  tv (E02C renders as a TV here)
             if (popSeriesLoaded)
-                showItems(popSeries, "Popular Shows", "No popular shows");
+                showItems(popSeries, "  Popular Shows", "No popular shows");
             else
-                loadCatalog("series", popSeries, popSeriesLoaded, "Popular Shows");
+                loadCatalog("series", popSeries, popSeriesLoaded,
+                            "  Popular Shows");
+            break;
+        case View::Search:
+            renderSearch();
             break;
         default:
             break;
     }
+}
+
+// The Search view: a focusable search bar at the top (A opens the keyboard),
+// then the results below it. The bar stays so you can search again.
+void StremioTab::renderSearch()
+{
+    parkFocusOffList();
+    *rowsAlive = false;
+    rowsAlive  = std::make_shared<bool>(true);
+    libList->clearViews();
+    loadingBox->setVisibility(brls::Visibility::GONE);
+    stremio::setLibraryCount(searchQuery.empty() ? "  Search"
+                                                 : "  Search · " + searchQuery);
+
+    // The search bar cell.
+    auto* bar = new brls::Box();
+    bar->setAxis(brls::Axis::ROW);
+    bar->setAlignItems(brls::AlignItems::CENTER);
+    bar->setHeight(72.0f);
+    bar->setPaddingLeft(20.0f);
+    bar->setPaddingRight(24.0f);
+    bar->setMarginRight(40.0f);
+    bar->setCornerRadius(6.0f);
+    bar->setBackgroundColor(nvgRGBA(255, 255, 255, 20));
+    bar->setFocusable(true);
+    bar->registerClickAction([this](brls::View*) { promptSearch(); return true; });
+    bar->addGestureRecognizer(new brls::TapGestureRecognizer(bar));
+    auto* icon = new brls::Label();
+    icon->setText("");  // Material "search" glyph (borealis fallback font)
+    icon->setFontSize(34.0f);
+    // The Material glyph sits high in its box; nudge it down to sit level with
+    // the placeholder text.
+    icon->setMargins(10.0f, 16.0f, 0.0f, 0.0f);
+    bar->addView(icon);
+    auto* barText = new brls::Label();
+    barText->setText(searchQuery.empty() ? "Search movies & shows..."
+                                         : searchQuery);
+    barText->setFontSize(24.0f);
+    barText->setTextColor(searchQuery.empty() ? nvgRGB(150, 150, 155)
+                                              : nvgRGB(255, 255, 255));
+    barText->setSingleLine(true);
+    bar->addView(barText);
+    // Gap before the first result (finishList overrides this to the bottom inset
+    // when the bar is the last row, i.e. before any search).
+    bar->setMarginBottom(18.0f);
+    libList->addView(bar);
+
+    brls::View* lastRow = bar;
+    if (!searchQuery.empty())
+    {
+        if (!searchLoaded || searchResults.empty())
+        {
+            auto* l = new brls::Label();
+            l->setText(!searchLoaded ? "Searching..."
+                                     : "No results for \"" + searchQuery + "\"");
+            l->setFontSize(20.0f);
+            l->setTextColor(nvgRGB(150, 150, 155));
+            l->setMargins(24.0f, 0.0f, 8.0f, 20.0f);
+            libList->addView(l);
+            lastRow = l;
+        }
+        else
+        {
+            for (const auto& it : searchResults) lastRow = addItemRow(it);
+        }
+    }
+    finishList(lastRow);
+}
+
+// Opens the on-screen keyboard, then runs the query.
+void StremioTab::promptSearch()
+{
+    brls::Application::getImeManager()->openForText(
+        [this, live = alive](std::string out) {
+            if (!*live || out.empty()) return;
+            searchQuery   = out;
+            searchLoaded  = false;
+            searchResults.clear();
+            renderSearch();   // show the bar + "Searching..."
+            stremio::fetchSearchAsync(
+                out, [this, live, want = out](stremio::LibraryResult r) {
+                    if (!*live || view != View::Search || searchQuery != want)
+                        return;
+                    searchResults = r.ok ? r.items : std::vector<stremio::LibItem>{};
+                    searchLoaded  = true;
+                    renderSearch();
+                });
+        },
+        "Search Stremio", "", 128, searchQuery);
 }
 
 // Fetches Cinemeta's "top" catalog for `type` into `cache`, then renders it if
@@ -1542,6 +1740,9 @@ void StremioTab::showItems(const std::vector<stremio::LibItem>& items,
     {
         showStatus(emptyMsg, false);   // centered message, no bar
         stremio::setLibraryCount(header);
+        pendingSlide = 0;              // nothing to slide
+        libList->setTranslationX(0.0f);
+        sliding = false;
         return;
     }
     // Rows to show: hide the centered overlay entirely.
@@ -1550,129 +1751,133 @@ void StremioTab::showItems(const std::vector<stremio::LibItem>& items,
 
     brls::Box* lastRow = nullptr;
     for (const auto& it : items)
+        lastRow = addItemRow(it);
+    finishList(lastRow);
+}
+
+// Builds one poster/title/progress row for `it`, adds it to libList, returns it.
+brls::Box* StremioTab::addItemRow(const stremio::LibItem& it)
+{
+    auto* row = new brls::Box();
+    row->setAxis(brls::Axis::ROW);
+    row->setAlignItems(brls::AlignItems::CENTER);
+    row->setHeight(140.0f);  // sized off the poster, not the text
+    row->setPaddingLeft(16.0f);
+    row->setPaddingRight(24.0f);
+    // Margin, not padding, and on the row rather than the list: the focus
+    // highlight draws OUTSIDE the row's bounds and the frame scissors to its own
+    // width, so a row reaching the edge has its glow clipped. Padding only moved
+    // the text and left the box (and its glow) at the edge; the row itself has to
+    // stop short. Also keeps the scrolling indicator, pinned to the frame's edge,
+    // in a lane of its own.
+    row->setMarginRight(40.0f);
+    row->setCornerRadius(6.0f);
+    row->setFocusable(true);
+    // Series open a season/episode picker, films go straight to sources.
+    std::string key = authKey;
+    row->registerClickAction([key, it](brls::View*) {
+        openLibraryItem(key, it);
+        return true;
+    });
+    // Tap gesture so the touchscreen works too (A-only otherwise).
+    row->addGestureRecognizer(new brls::TapGestureRecognizer(row));
+
+    // Poster. Posters are 2:3, so fit rather than stretch. It arrives
+    // asynchronously: the row draws immediately with an empty slot and the
+    // artwork fills in, instead of the whole list waiting on the network.
+    auto* art = new brls::Image();
+    art->setDimensions(80.0f, 120.0f);  // 2:3, the poster aspect
+    art->setScalingType(brls::ImageScalingType::FIT);
+    art->setCornerRadius(6.0f);  // rounded poster corners (borealis clips it)
+    art->setMarginRight(22.0f);
+    row->addView(art);
+
+    auto alive = rowsAlive;  // list may be rebuilt before the art lands
+    stremio::fetchPosterAsync(it.id, it.poster, [art, alive](std::string path) {
+        if (!*alive || path.empty()) return;
+        art->setImageFromFile(path);
+    });
+
+    // Name over an optional watch-progress bar (where the account is in this
+    // film / the show's last watched episode, from the library state).
+    auto* textCol = new brls::Box();
+    textCol->setAxis(brls::Axis::COLUMN);
+    textCol->setJustifyContent(brls::JustifyContent::CENTER);
+    textCol->setGrow(1.0f);
+
+    auto* name = new brls::Label();
+    name->setText(it.name);
+    name->setFontSize(26.0f);  // scaled to the taller row
+    name->setSingleLine(true);
+    textCol->addView(name);
+
+    double prog = it.progress();
+
+    // For a show mid-episode, name the episode under the title: the videoId is
+    // "ttID:season:episode", so the last two ':'-parts are what we show. (The
+    // episode's own title needs a meta fetch we do not do per row.)
+    if (prog > 0.005 && it.type == "series" && !it.videoId.empty())
     {
-        auto* row = new brls::Box();
-        row->setAxis(brls::Axis::ROW);
-        row->setAlignItems(brls::AlignItems::CENTER);
-        row->setHeight(140.0f);  // sized off the poster, not the text
-        row->setPaddingLeft(16.0f);
-        row->setPaddingRight(24.0f);
-        // Margin, not padding, and on the row rather than the list: the focus
-        // highlight draws OUTSIDE the row's bounds and the frame scissors to its
-        // own width, so a row reaching the edge has its glow clipped. Padding
-        // only moved the text and left the box (and its glow) at the edge; the
-        // row itself has to stop short. Also keeps the scrolling indicator,
-        // pinned to the frame's edge, in a lane of its own.
-        row->setMarginRight(40.0f);
-        row->setCornerRadius(6.0f);
-        row->setFocusable(true);
-        // Series open a season/episode picker, films go straight to sources.
-        std::string key = authKey;
-        row->registerClickAction([key, it](brls::View*) {
-            openLibraryItem(key, it);
-            return true;
-        });
-        // Tap gesture so the touchscreen works too (A-only otherwise).
-        row->addGestureRecognizer(new brls::TapGestureRecognizer(row));
-
-        // Poster. Posters are 2:3, so fit rather than stretch. It arrives
-        // asynchronously: the row draws immediately with an empty slot and the
-        // artwork fills in, instead of the whole list waiting on the network.
-        auto* art = new brls::Image();
-        art->setDimensions(80.0f, 120.0f);  // 2:3, the poster aspect
-        art->setScalingType(brls::ImageScalingType::FIT);
-        art->setMarginRight(22.0f);
-        row->addView(art);
-
-        auto alive = rowsAlive;  // list may be rebuilt before the art lands
-        stremio::fetchPosterAsync(it.id, it.poster,
-                                  [art, alive](std::string path) {
-                                      if (!*alive || path.empty()) return;
-                                      art->setImageFromFile(path);
-                                  });
-
-        // Name over an optional watch-progress bar (where the account is in
-        // this film / the show's last watched episode, from the library state).
-        auto* textCol = new brls::Box();
-        textCol->setAxis(brls::Axis::COLUMN);
-        textCol->setJustifyContent(brls::JustifyContent::CENTER);
-        textCol->setGrow(1.0f);
-
-        auto* name = new brls::Label();
-        name->setText(it.name);
-        name->setFontSize(26.0f);  // scaled to the taller row
-        name->setSingleLine(true);
-        textCol->addView(name);
-
-        double prog = it.progress();
-
-        // For a show mid-episode, name the episode under the title: the videoId
-        // is "ttID:season:episode", so the last two ':'-parts are what we show.
-        // (The episode's own title needs a meta fetch we do not do per row.)
-        if (prog > 0.005 && it.type == "series" && !it.videoId.empty())
+        std::string se = it.videoId;
+        size_t p2 = se.rfind(':');
+        size_t p1 = p2 == std::string::npos ? p2 : se.rfind(':', p2 - 1);
+        if (p1 != std::string::npos && p2 != std::string::npos)
         {
-            std::string se = it.videoId;
-            size_t p2 = se.rfind(':');
-            size_t p1 = p2 == std::string::npos ? p2 : se.rfind(':', p2 - 1);
-            if (p1 != std::string::npos && p2 != std::string::npos)
-            {
-                std::string ep = "Season " + se.substr(p1 + 1, p2 - p1 - 1) +
-                                 " · Episode " + se.substr(p2 + 1);
-                auto* epl = new brls::Label();
-                epl->setText(ep);
-                epl->setFontSize(18.0f);
-                epl->setTextColor(nvgRGB(150, 150, 155));
-                epl->setSingleLine(true);
-                epl->setMarginTop(4.0f);
-                textCol->addView(epl);
-            }
+            std::string ep = "Season " + se.substr(p1 + 1, p2 - p1 - 1) +
+                             " · Episode " + se.substr(p2 + 1);
+            auto* epl = new brls::Label();
+            epl->setText(ep);
+            epl->setFontSize(18.0f);
+            epl->setTextColor(nvgRGB(150, 150, 155));
+            epl->setSingleLine(true);
+            epl->setMarginTop(4.0f);
+            textCol->addView(epl);
         }
-
-        if (prog > 0.005)
-        {
-            auto* track = new brls::Box();
-            track->setWidthPercentage(100.0f);
-            track->setHeight(5.0f);
-            track->setCornerRadius(2.5f);
-            track->setBackgroundColor(nvgRGBA(255, 255, 255, 40));
-            track->setMarginTop(10.0f);
-
-            auto* fill = new brls::Box();
-            fill->setWidthPercentage((float)(prog * 100.0));
-            fill->setHeight(5.0f);
-            fill->setCornerRadius(2.5f);
-            fill->setBackgroundColor(
-                brls::Application::getTheme().getColor("brls/accent"));
-            track->addView(fill);
-            textCol->addView(track);
-        }
-        row->addView(textCol);
-
-        auto* type = new brls::Label();
-        type->setText(it.type == "series" ? "Show" : "Movie");
-        type->setFontSize(19.0f);
-        type->setTextColor(nvgRGB(150, 150, 155));
-        type->setMarginLeft(16.0f);
-        // Keep it on one line and let it hold its width: the full-width progress
-        // bar in textCol otherwise squeezed this label until it wrapped.
-        type->setSingleLine(true);
-        type->setShrink(0.0f);
-        row->addView(type);
-
-        libList->addView(row);
-        lastRow = row;
     }
 
-    // Only the first row gets the escape route: every other one has a row above
-    // it to move to.
-    // Hand the parked focus (see onAuthenticated) to a real row, and stop the
-    // box standing in for one -- a focusable Box returns *itself* from
-    // getDefaultFocus(), which would keep the rows unreachable.
+    if (prog > 0.005)
+    {
+        auto* track = new brls::Box();
+        track->setWidthPercentage(100.0f);
+        track->setHeight(5.0f);
+        track->setCornerRadius(2.5f);
+        track->setBackgroundColor(nvgRGBA(255, 255, 255, 40));
+        track->setMarginTop(10.0f);
+
+        auto* fill = new brls::Box();
+        fill->setWidthPercentage((float)(prog * 100.0));
+        fill->setHeight(5.0f);
+        fill->setCornerRadius(2.5f);
+        fill->setBackgroundColor(
+            brls::Application::getTheme().getColor("brls/accent"));
+        track->addView(fill);
+        textCol->addView(track);
+    }
+    row->addView(textCol);
+
+    auto* type = new brls::Label();
+    type->setText(it.type == "series" ? "Show" : "Movie");
+    type->setFontSize(19.0f);
+    type->setTextColor(nvgRGB(150, 150, 155));
+    type->setMarginLeft(16.0f);
+    // Keep it on one line and let it hold its width: the full-width progress bar
+    // in textCol otherwise squeezed this label until it wrapped.
+    type->setSingleLine(true);
+    type->setShrink(0.0f);
+    row->addView(type);
+
+    libList->addView(row);
+    return row;
+}
+
+// Common tail after (re)building libList: first-row inset, focus/scroll reset on
+// a view change, the up-route to the tab bar, and the bottom inset.
+void StremioTab::finishList(brls::View* lastRow)
+{
     if (!libList->getChildren().empty())
     {
         // Top inset on the first row, mirroring the bottom one below: it starts
-        // right under the header otherwise. Margin (not padding) for the same
-        // reason the bottom uses one -- setContentView ignores the list's own.
+        // right under the header otherwise.
         libList->getChildren()[0]->setMarginTop(20.0f);
 
         brls::View* focus = brls::Application::getCurrentFocus();
@@ -1684,16 +1889,25 @@ void StremioTab::showItems(const std::vector<stremio::LibItem>& items,
             brls::Application::giveFocus(libList->getChildren()[0]);
         if (resetOnShow && libScroll)
             libScroll->setContentOffsetY(0.0f, false);
+
+        if (stremio::libraryUpTarget)
+            libList->getChildren()[0]->setCustomNavigationRoute(
+                brls::FocusDirection::UP, stremio::libraryUpTarget);
     }
     resetOnShow = false;
 
-    if (stremio::libraryUpTarget && !libList->getChildren().empty())
-        libList->getChildren()[0]->setCustomNavigationRoute(
-            brls::FocusDirection::UP, stremio::libraryUpTarget);
+    // Kick off the horizontal slide-in for a view change.
+    if (pendingSlide != 0)
+    {
+        slideSign  = pendingSlide;
+        slideStart = std::chrono::duration<double>(
+                         std::chrono::steady_clock::now().time_since_epoch())
+                         .count();
+        sliding      = true;
+        pendingSlide = 0;
+    }
 
-    // Breathing room under the last row, so scrolled to the end it sits above
-    // the screen edge instead of against it. It goes on the row rather than on
-    // libList: setContentView() ignores that box's own margins, and a padding
-    // there would apply whether or not there is anything to scroll.
+    // Breathing room under the last row, so scrolled to the end it sits above the
+    // screen edge instead of against it.
     if (lastRow) lastRow->setMarginBottom(32.0f);
 }

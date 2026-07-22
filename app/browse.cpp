@@ -159,6 +159,7 @@ class RowCell : public brls::Box
             auto* art = new brls::Image();
             art->setDimensions(114.0f, 64.0f);  // 16:9, the still's aspect
             art->setScalingType(brls::ImageScalingType::FIT);
+            art->setCornerRadius(6.0f);  // rounded corners, like the library posters
             art->setMarginRight(18.0f);
             art->setShrink(0.0f);
             this->addView(art);

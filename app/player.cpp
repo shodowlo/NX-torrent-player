@@ -712,6 +712,7 @@ void MpvView::buildLoadingOverlay(const std::string& title)
     {
         logo->setImageFromFile(art.posterPath);
         logo->setDimensions(148.0f, 222.0f);  // posters are 2:3
+        logo->setCornerRadius(8.0f);           // rounded poster corners
     }
     else
     {

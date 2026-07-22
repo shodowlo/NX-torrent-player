@@ -505,6 +505,15 @@ brls::View* buildLocalTab()
     return content;
 }
 
+// The Stremio view chip sits next to the header title: "· <glyph> <name>". The
+// glyph is its OWN centred Label (a Material glyph inside the title text floats
+// high off the text baseline); these are wired up in buildBrowser and updated by
+// the library-count sink. File scope so applyTabIdentity can hide them off-tab.
+brls::Box*   g_viewChip  = nullptr;
+brls::Label* g_viewSep   = nullptr;
+brls::Label* g_viewGlyph = nullptr;
+brls::Label* g_viewName  = nullptr;
+
 // Title + icon identifying the category on screen: the app itself for Local,
 // Stremio's own mark for Stremio. Called on every tab switch, in both layouts.
 void applyTabIdentity(brls::AppletFrame* frame, config::Tab tab)
@@ -518,6 +527,8 @@ void applyTabIdentity(brls::AppletFrame* frame, config::Tab tab)
     {
         frame->setTitle("NX Torrent Player");
         frame->setIcon("romfs:/local-icon.png");
+        // The view chip belongs to Stremio only -- drop it on the Local tab.
+        if (g_viewChip) g_viewChip->setVisibility(brls::Visibility::GONE);
     }
     // The header icon is sized "auto", i.e. from the texture, and these two are
     // not the same pixel size -- pin both to the same box.
@@ -668,12 +679,76 @@ brls::View* buildBrowser()
             ((brls::TabFrame*)frame->getContentView())->focusTab(1);
     }
 
-    // The Stremio library reports its item count through the header title rather
-    // than a row above the list. applyTabIdentity sets the base "Stremio"; this
-    // appends the count while the library is shown, and clears back on reload /
-    // tab switch (the empty string).
+    // The Stremio library reports its current view through the header, next to
+    // the "Stremio" title, as "· <glyph> <name>". Rather than fold the glyph into
+    // the title text (where a Material glyph rides high off the baseline), we
+    // render it as a separate, vertically-centred Label in a chip appended to the
+    // header's title box. We reach that box via the title label's parent, so no
+    // borealis change is needed.
+    {
+        float fs     = brls::Application::getStyle()["brls/applet_frame/header_title_font_size"];
+        float topOff = brls::Application::getStyle()["brls/applet_frame/header_title_top_offset"];
+        auto* titleLabel = dynamic_cast<brls::Label*>(
+            frame->getView("brls/applet_frame/title_label"));
+        auto* titleBox = titleLabel
+            ? dynamic_cast<brls::Box*>(titleLabel->getParent()) : nullptr;
+        if (titleBox)
+        {
+            g_viewChip = new brls::Box();
+            g_viewChip->setAxis(brls::Axis::ROW);
+            g_viewChip->setAlignItems(brls::AlignItems::CENTER);
+            g_viewChip->setMarginTop(topOff);
+            g_viewChip->setMarginLeft(14.0f);
+            g_viewChip->setVisibility(brls::Visibility::GONE);
+
+            g_viewSep = new brls::Label();
+            g_viewSep->setFontSize(fs);
+            g_viewSep->setText("·");
+            g_viewChip->addView(g_viewSep);
+
+            g_viewGlyph = new brls::Label();
+            g_viewGlyph->setFontSize(fs);
+            g_viewGlyph->setMarginLeft(12.0f);
+            g_viewGlyph->setMarginRight(9.0f);
+            // A Material glyph sits high in its line box (ink fills toward the
+            // ascender, none below the baseline). translationY drops just the
+            // rendered glyph, without growing its layout box, so the separator and
+            // name keep their place.
+            g_viewGlyph->setTranslationY(fs * 0.11f);
+            g_viewChip->addView(g_viewGlyph);
+
+            g_viewName = new brls::Label();
+            g_viewName->setFontSize(fs);
+            g_viewChip->addView(g_viewName);
+
+            titleBox->addView(g_viewChip);
+        }
+    }
+
+    // Each header arrives as "<glyph 3 bytes>  <name>" (or "" to clear). Split the
+    // leading PUA glyph off so it lands in its own centred Label; the name follows.
     stremio::setLibraryCountSink([frame](const std::string& count) {
-        frame->setTitle(count.empty() ? "Stremio" : "Stremio  ·  " + count);
+        frame->setTitle("Stremio");
+        if (!g_viewChip) return;
+        if (count.empty())
+        {
+            g_viewChip->setVisibility(brls::Visibility::GONE);
+            return;
+        }
+        std::string glyph, name = count;
+        unsigned char lead = (unsigned char)count[0];
+        if (lead >= 0xEE && count.size() >= 3)  // 3-byte UTF-8 PUA glyph
+        {
+            glyph = count.substr(0, 3);
+            name  = count.substr(3);
+            size_t s = name.find_first_not_of(' ');
+            name = (s == std::string::npos) ? "" : name.substr(s);
+        }
+        g_viewGlyph->setText(glyph);
+        g_viewGlyph->setVisibility(glyph.empty() ? brls::Visibility::GONE
+                                                 : brls::Visibility::VISIBLE);
+        g_viewName->setText(name);
+        g_viewChip->setVisibility(brls::Visibility::VISIBLE);
     });
 
     frame->registerAction("Options", brls::BUTTON_X, [](brls::View*) {

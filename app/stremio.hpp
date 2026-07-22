@@ -158,6 +158,11 @@ void fetchStreamsAsync(const std::string& addonBase, const std::string& type,
                        const std::string& id,
                        std::function<void(StreamsResult)> done);
 
+// Full-text search against Cinemeta's catalog, movies then series, merged into
+// one LibItem list (id/name/type/poster). One background call, one UI callback.
+void fetchSearchAsync(const std::string& query,
+                      std::function<void(LibraryResult)> done);
+
 // A meta catalog ("popular", "top", ...) from an addon (Cinemeta by default):
 // {base}/catalog/{type}/{catalogId}.json. The metas come back as LibItems
 // (id/name/type/poster, no watch state), so the same row builder shows them.
@@ -272,6 +277,7 @@ class StremioTab : public brls::Box
         PopularMovies,
         PopularSeries,
         Library,
+        Search,
         COUNT
     };
     View view = View::ContinueWatching;
@@ -281,6 +287,14 @@ class StremioTab : public brls::Box
                    const std::string& header, const char* emptyMsg);
     void loadCatalog(const char* type, std::vector<stremio::LibItem>& cache,
                      bool& loaded, const std::string& header);
+    brls::Box* addItemRow(const stremio::LibItem& it);  // one poster row
+    void finishList(brls::View* lastRow);  // focus/reset/slide after (re)building
+    void renderSearch();       // the Search view: a search bar + results
+    void promptSearch();       // opens the keyboard, runs the query
+
+    std::string searchQuery;
+    std::vector<stremio::LibItem> searchResults;
+    bool searchLoaded = false;
 
     // The last library fetch, kept so Continue Watching and Library render
     // without re-hitting the network on every R press.
@@ -314,6 +328,18 @@ class StremioTab : public brls::Box
     // and scrolls back to the top -- a view change should not keep the old
     // scroll position or focus deep in the previous list.
     bool resetOnShow = false;
+
+    // Horizontal slide-in when the view changes: cycleView records the direction
+    // (R = +1 enters from the right, L = -1 from the left); showItems starts the
+    // animation once its rows are up; draw() eases the list back to x=0.
+    int pendingSlide = 0;   // direction to play on the next showItems, 0 = none
+    int slideSign    = 0;   // direction of the running animation
+    double slideStart = 0;  // steady_clock seconds when it began
+    bool sliding      = false;
+
+    // Analog stick view cycling: one cycle per horizontal flick (latched until
+    // the stick recenters), polled in draw() since the stick is an axis.
+    bool stickLatched = false;
 
     // Invalidated whenever the list is rebuilt. Poster fetches hold a raw
     // pointer to their Image; clearViews() deletes those, so a fetch that lands
