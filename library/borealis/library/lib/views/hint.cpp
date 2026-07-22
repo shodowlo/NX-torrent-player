@@ -27,6 +27,13 @@ using namespace brls::literals;
 namespace brls
 {
 
+// LOCAL PATCH (NX Torrent Player) -- see library/borealis/VENDORED.md, re-apply
+// if borealis is re-cloned. The "icon" label's fontSize below is lowered from the
+// upstream 25.5 to 21.5 so it matches the "hint" text label (left at 21.5): the
+// Stremio view hint packs a second button glyph into the hint text, and it must
+// be the same size as the auto icon glyph beside it. Lowering the icon (rather
+// than raising the text) keeps every footer label at its original size -- only
+// the button glyphs shrink slightly, to sit level with their labels.
 const std::string hintXML = R"xml(
     <brls:Box
         width="auto"
@@ -41,7 +48,7 @@ const std::string hintXML = R"xml(
                 id="icon"
                 width="auto"
                 height="auto"
-                fontSize="25.5"/>
+                fontSize="21.5"/>
 
             <brls:Label
                 id="hint"

@@ -22,6 +22,8 @@
 #include <cstdio>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <chrono>
+#include <cmath>
 #include <cstring>
 #include <ctime>
 #include <string>
@@ -250,6 +252,32 @@ std::string loadEmail()
 static brls::View* libraryUpTarget = nullptr;
 
 void setLibraryUpTarget(brls::View* target) { libraryUpTarget = target; }
+
+// Sink that puts the library item count in the header (see the header comment).
+static std::function<void(const std::string&)> libraryCountSink;
+
+void setLibraryCountSink(std::function<void(const std::string&)> sink)
+{
+    libraryCountSink = std::move(sink);
+}
+
+static void setLibraryCount(const std::string& text)
+{
+    if (libraryCountSink) libraryCountSink(text);
+}
+
+// The live Stremio tab's view cycler, so R/L work from the header tab bar too.
+static std::function<void(int)> viewCycler;
+
+void setViewCycler(std::function<void(int)> cycler)
+{
+    viewCycler = std::move(cycler);
+}
+
+void cycleActiveView(int dir)
+{
+    if (viewCycler) viewCycler(dir);
+}
 
 // A blurred copy of a cached poster, for use as a full-screen background.
 // Returns its path, or "" if the source could not be read.
@@ -1017,6 +1045,40 @@ void fetchStreamsAsync(const std::string& addonBase, const std::string& type,
     });
 }
 
+void fetchCatalogAsync(const std::string& addonBase, const std::string& type,
+                       const std::string& catalogId,
+                       std::function<void(LibraryResult)> done)
+{
+    brls::async([addonBase, type, catalogId, done]() {
+        LibraryResult r;
+        std::string url = addonBase + "/catalog/" + http::urlEncode(type) + "/" +
+                          http::urlEncode(catalogId) + ".json";
+        std::string resp, err;
+        if (!http::get(url, resp, err))
+        {
+            r.error = err;
+        }
+        else
+        {
+            r.ok = true;
+            for (const auto& o : json::objects(resp, "metas"))
+            {
+                LibItem it;
+                it.id     = json::str(o, "id");
+                it.name   = json::str(o, "name");
+                it.type   = json::str(o, "type");
+                if (it.type.empty()) it.type = type;
+                it.poster = json::str(o, "poster");
+                if (it.id.empty() || it.name.empty()) continue;
+                r.items.push_back(it);
+            }
+            brls::Logger::info("[stremio] catalog {}/{} -> {} items", type,
+                               catalogId, r.items.size());
+        }
+        brls::sync([done, r]() { done(r); });
+    });
+}
+
 } // namespace stremio
 
 StremioTab::StremioTab()
@@ -1104,25 +1166,66 @@ StremioTab::StremioTab()
     //    edge (getWidth() - 14), so any padding here pushed the bar inwards on
     //    top of the row text. The frame now reaches the screen edge and the
     //    rows carry the inset instead.
-    libraryBox->setPadding(32.0f, 0.0f, 0.0f, 60.0f);
+    // No top padding: the item count that used to sit here moved to the header,
+    // so the list starts right under it.
+    libraryBox->setPadding(0.0f, 0.0f, 0.0f, 60.0f);
     libraryBox->setVisibility(brls::Visibility::GONE);
-
-    libStatus = new brls::Label();
-    libStatus->setText("");
-    libStatus->setFontSize(20);
-    libStatus->setTextColor(hintColor);
-    libStatus->setMargins(0, 60.0f, 16, 0);  // matches the inset the rows carry
-    libraryBox->addView(libStatus);
 
     auto* scroll = new brls::ScrollingFrame();
     scroll->setGrow(1.0f);
+    // CENTERED, not the default NATURAL: NATURAL free-scrolls by the pixel, so
+    // holding UP glides past rows with no per-row stop and never cleanly hands
+    // focus to the header tab bar, and coming back down lands on whatever row is
+    // topmost on screen (the 4th, after scrolling) instead of the first.
+    // CENTERED moves focus one row at a time, scrolling to keep it in view.
+    scroll->setScrollingBehavior(brls::ScrollingBehavior::CENTERED);
+    libScroll = scroll;
     libList = new brls::Box();
     libList->setAxis(brls::Axis::COLUMN);
     // No margin here: ScrollingFrame::setContentView() detaches the content view
     // and forces setWidth(frameWidth), so anything set on this box is ignored.
-    // The inset has to live on the rows themselves (see showLibrary).
+    // The inset has to live on the rows themselves (see showItems).
     scroll->setContentView(libList);
     libraryBox->addView(scroll);
+
+    // Centered loading/status overlay over the list: a message, and under it an
+    // indeterminate bar (a segment sliding back and forth, animated in draw())
+    // shown only while loading. Absolute + full-size so it centres on screen and
+    // does not push the list.
+    loadingBox = new brls::Box();
+    loadingBox->setAxis(brls::Axis::COLUMN);
+    loadingBox->setPositionType(brls::PositionType::ABSOLUTE);
+    loadingBox->setPositionTop(0.0f);
+    loadingBox->setPositionLeft(0.0f);
+    loadingBox->setWidthPercentage(100.0f);
+    loadingBox->setHeightPercentage(100.0f);
+    loadingBox->setJustifyContent(brls::JustifyContent::CENTER);
+    loadingBox->setAlignItems(brls::AlignItems::CENTER);
+    loadingBox->setVisibility(brls::Visibility::GONE);
+
+    libStatus = new brls::Label();
+    libStatus->setText("");
+    libStatus->setFontSize(22);
+    libStatus->setTextColor(hintColor);
+    libStatus->setHorizontalAlign(brls::HorizontalAlign::CENTER);
+    loadingBox->addView(libStatus);
+
+    loadingBar = new brls::Box();
+    loadingBar->setWidth(300.0f);
+    loadingBar->setHeight(5.0f);
+    loadingBar->setCornerRadius(2.5f);
+    loadingBar->setMarginTop(22.0f);
+    loadingBar->setClipsToBounds(true);   // keep the sliding fill inside the track
+    loadingBar->setBackgroundColor(nvgRGBA(255, 255, 255, 35));
+    loadingFill = new brls::Box();
+    loadingFill->setWidth(90.0f);
+    loadingFill->setHeight(5.0f);
+    loadingFill->setCornerRadius(2.5f);
+    loadingFill->setBackgroundColor(
+        brls::Application::getTheme().getColor("brls/accent"));
+    loadingBar->addView(loadingFill);
+    loadingBox->addView(loadingBar);
+    libraryBox->addView(loadingBox);
 
     this->addView(libraryBox);
 
@@ -1139,6 +1242,13 @@ StremioTab::StremioTab()
         },
         false, false, brls::SOUND_NONE);
 
+    // R/L cycle Continue Watching -> Popular Movies -> Popular Shows -> Library.
+    // Registered on the frame (main.cpp) via this cycler, not on the tab, so R/L
+    // also work while focus is on the header tab bar (outside this view tree).
+    stremio::setViewCycler([this](int dir) {
+        if (!authKey.empty() && libLoaded) cycleView(dir);
+    });
+
     // Already signed in from a previous run: skip straight to the library.
     std::string saved = stremio::loadAuthKey();
     if (!saved.empty())
@@ -1153,6 +1263,7 @@ StremioTab::~StremioTab()
     // freed poster Image).
     *alive     = false;
     *rowsAlive = false;
+    stremio::setViewCycler(nullptr);   // no live tab for the frame's R/L to reach
     if (focusSubbed)
         brls::Application::getGlobalFocusChangeEvent()->unsubscribe(focusSub);
 }
@@ -1248,7 +1359,7 @@ void StremioTab::onAuthenticated(const std::string& key, bool announce)
     // dangling and the next frame drew the highlight on freed memory.
     //
     // So park the focus on the library box itself (no highlight of its own)
-    // until there are rows to move it to; showLibrary takes it from there.
+    // until there are rows to move it to; showItems takes it from there.
     libraryBox->setFocusable(true);
     libraryBox->setHideHighlight(true);
     brls::Application::giveFocus(libraryBox);
@@ -1275,9 +1386,38 @@ void StremioTab::parkFocusOffList()
     }
 }
 
+// Centered message; with `loading`, the indeterminate bar under it too.
+void StremioTab::showStatus(const std::string& msg, bool loading)
+{
+    libStatus->setText(msg);
+    loadingBar->setVisibility(loading ? brls::Visibility::VISIBLE
+                                      : brls::Visibility::GONE);
+    loadingBox->setVisibility(brls::Visibility::VISIBLE);
+}
+
+// Slides the loading segment left<->right while the bar is shown. Time-based, so
+// it is smooth regardless of frame rate; a no-op when the bar is hidden.
+void StremioTab::draw(NVGcontext* vg, float x, float y, float width, float height,
+                      brls::Style style, brls::FrameContext* ctx)
+{
+    if (loadingBox && loadingBar && loadingFill &&
+        loadingBox->getVisibility() == brls::Visibility::VISIBLE &&
+        loadingBar->getVisibility() == brls::Visibility::VISIBLE)
+    {
+        double t = std::chrono::duration<double>(
+                       std::chrono::steady_clock::now().time_since_epoch())
+                       .count();
+        const float track = 300.0f, seg = 90.0f;
+        float phase = (float)((std::sin(t * 3.0) + 1.0) * 0.5);  // 0..1 ease
+        loadingFill->setTranslationX(phase * (track - seg));
+    }
+    brls::Box::draw(vg, x, y, width, height, style, ctx);
+}
+
 void StremioTab::loadLibrary()
 {
-    libStatus->setText("Loading library...");
+    showStatus("Loading library...", true);
+    stremio::setLibraryCount("");  // header back to a plain title while loading
     parkFocusOffList();
 
     *rowsAlive = false;                       // drop any in-flight poster fetch
@@ -1294,15 +1434,104 @@ void StremioTab::loadLibrary()
         if (!*live) return;
         if (!r.ok)
         {
-            libStatus->setText("Error");
+            showStatus("Error", false);
             dialog("Library unavailable: " + r.error);
             return;
         }
-        showLibrary(r.items);
+        libItems  = r.items;   // cached for Continue Watching + Library views
+        libLoaded = true;
+        renderView();          // lands on the default view (Continue Watching)
     });
 }
 
-void StremioTab::showLibrary(const std::vector<stremio::LibItem>& items)
+// R (dir +1) / L (dir -1) cycle the view; wraps around.
+void StremioTab::cycleView(int dir)
+{
+    int n = static_cast<int>(View::COUNT);
+    view  = static_cast<View>(((static_cast<int>(view) + dir) % n + n) % n);
+    resetOnShow = true;   // land on the first row, scrolled to the top
+    renderView();
+}
+
+// Builds the list for the current view. Continue Watching and Library come from
+// the cached library; the two Popular views pull Cinemeta's top catalog once and
+// cache it, showing a loading line in between.
+void StremioTab::renderView()
+{
+    switch (view)
+    {
+        case View::ContinueWatching:
+        {
+            // Library items with playback started but not finished, newest first
+            // (the library is already sorted by mtime desc). Not every one is in
+            // the library proper -- Stremio auto-adds watched titles as temp
+            // entries, which is exactly Continue Watching.
+            std::vector<stremio::LibItem> cw;
+            for (const auto& it : libItems)
+            {
+                double p = it.progress();
+                if (p > 0.005 && p < 0.95) cw.push_back(it);
+            }
+            showItems(cw, "Continue Watching", "Nothing in progress");
+            break;
+        }
+        case View::Library:
+            showItems(libItems, "Library · " + std::to_string(libItems.size()) +
+                                    " items",
+                      "Library is empty");
+            break;
+        case View::PopularMovies:
+            if (popMoviesLoaded)
+                showItems(popMovies, "Popular Movies", "No popular movies");
+            else
+                loadCatalog("movie", popMovies, popMoviesLoaded, "Popular Movies");
+            break;
+        case View::PopularSeries:
+            if (popSeriesLoaded)
+                showItems(popSeries, "Popular Shows", "No popular shows");
+            else
+                loadCatalog("series", popSeries, popSeriesLoaded, "Popular Shows");
+            break;
+        default:
+            break;
+    }
+}
+
+// Fetches Cinemeta's "top" catalog for `type` into `cache`, then renders it if
+// the view has not moved on since. Header shows a loading line meanwhile.
+void StremioTab::loadCatalog(const char* type,
+                             std::vector<stremio::LibItem>& cache, bool& loaded,
+                             const std::string& header)
+{
+    parkFocusOffList();
+    *rowsAlive = false;
+    rowsAlive  = std::make_shared<bool>(true);
+    libList->clearViews();
+    showStatus("Loading...", true);
+    stremio::setLibraryCount(header);
+
+    View want = view;  // if R moves on before this lands, drop it
+    std::string t = type;
+    stremio::fetchCatalogAsync(
+        "https://v3-cinemeta.strem.io", type, "top",
+        [this, live = alive, want, t, &cache, &loaded, header](
+            stremio::LibraryResult r) {
+            if (!*live || view != want) return;
+            if (!r.ok)
+            {
+                showStatus("Error", false);
+                dialog("Popular " + t + " unavailable: " + r.error);
+                return;
+            }
+            cache  = r.items;
+            loaded = true;
+            showItems(cache, header,
+                      t == "series" ? "No popular shows" : "No popular movies");
+        });
+}
+
+void StremioTab::showItems(const std::vector<stremio::LibItem>& items,
+                           const std::string& header, const char* emptyMsg)
 {
     parkFocusOffList();                       // never clearViews a focused row
     *rowsAlive = false;                       // same: these rows are about to die
@@ -1311,14 +1540,13 @@ void StremioTab::showLibrary(const std::vector<stremio::LibItem>& items)
 
     if (items.empty())
     {
-        libStatus->setText("Library is empty");
+        showStatus(emptyMsg, false);   // centered message, no bar
+        stremio::setLibraryCount(header);
         return;
     }
-    // "Library" here means what Stremio calls a library item: titles explicitly
-    // added, plus whatever you watched (which Stremio auto-adds as a temporary
-    // entry). It is not a full watch history.
-    libStatus->setText(std::to_string(items.size()) +
-                       " item(s) in your Stremio library");
+    // Rows to show: hide the centered overlay entirely.
+    loadingBox->setVisibility(brls::Visibility::GONE);
+    stremio::setLibraryCount(header);
 
     brls::Box* lastRow = nullptr;
     for (const auto& it : items)
@@ -1442,11 +1670,22 @@ void StremioTab::showLibrary(const std::vector<stremio::LibItem>& items)
     // getDefaultFocus(), which would keep the rows unreachable.
     if (!libList->getChildren().empty())
     {
+        // Top inset on the first row, mirroring the bottom one below: it starts
+        // right under the header otherwise. Margin (not padding) for the same
+        // reason the bottom uses one -- setContentView ignores the list's own.
+        libList->getChildren()[0]->setMarginTop(20.0f);
+
         brls::View* focus = brls::Application::getCurrentFocus();
         bool parked = !focus || focus == libraryBox || isUnder(focus, loginBox);
         libraryBox->setFocusable(false);
-        if (parked) brls::Application::giveFocus(libList->getChildren()[0]);
+        // resetOnShow (a view change) forces the cursor to the first row and the
+        // list back to the top, regardless of where focus was in the old list.
+        if (parked || resetOnShow)
+            brls::Application::giveFocus(libList->getChildren()[0]);
+        if (resetOnShow && libScroll)
+            libScroll->setContentOffsetY(0.0f, false);
     }
+    resetOnShow = false;
 
     if (stremio::libraryUpTarget && !libList->getChildren().empty())
         libList->getChildren()[0]->setCustomNavigationRoute(

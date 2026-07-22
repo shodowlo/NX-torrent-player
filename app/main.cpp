@@ -668,10 +668,34 @@ brls::View* buildBrowser()
             ((brls::TabFrame*)frame->getContentView())->focusTab(1);
     }
 
+    // The Stremio library reports its item count through the header title rather
+    // than a row above the list. applyTabIdentity sets the base "Stremio"; this
+    // appends the count while the library is shown, and clears back on reload /
+    // tab switch (the empty string).
+    stremio::setLibraryCountSink([frame](const std::string& count) {
+        frame->setTitle(count.empty() ? "Stremio" : "Stremio  ·  " + count);
+    });
+
     frame->registerAction("Options", brls::BUTTON_X, [](brls::View*) {
         brls::Application::pushActivity(new SettingsActivity());
         return true;
     });
+
+    // R/L cycle the Stremio view. On the frame (not the tab) so they work with
+    // focus on the header tab bar too; a no-op when the Stremio tab is not live.
+    // One chip "L R  View": L is the auto icon, R is a glyph in the hint text.
+    // (The text glyph renders a touch smaller than the icon -- a borealis hint
+    // quirk -- but this keeps them side by side; the R action is hidden so it
+    // does not add a second chip.)
+    frame->registerAction("  View", brls::BUTTON_LB, [](brls::View*) {
+        stremio::cycleActiveView(-1);
+        return true;
+    }, false, false, brls::SOUND_NONE);
+    frame->registerAction("View", brls::BUTTON_RB, [](brls::View*) {
+        stremio::cycleActiveView(+1);
+        return true;
+    }, true, false, brls::SOUND_NONE);
+
     return frame;
 }
 

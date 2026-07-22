@@ -14,7 +14,7 @@ the local patch below.
 
 ## Local patches
 
-Both are marked with a `LOCAL PATCH` comment in the source.
+All are marked with a `LOCAL PATCH` comment in the source.
 
 ### 1. `library/include/borealis/core/application.hpp` — `setInputType` public
 
@@ -40,6 +40,16 @@ borealis: only the per-socket initial buffers are cut. Growing the pool instead
 starved the nvtegra video decoder, which then fell back to software H.264.
 
 The patch is marked with a `LOCAL PATCH` comment in the source.
+
+### 3. `library/lib/views/hint.cpp` — hint icon font size
+
+Lowered the footer hint's `icon` label `fontSize` from the upstream `25.5` to
+`21.5`, matching the `hint` text label (left at `21.5`). The Stremio view hint
+(main.cpp) packs a second controller-button glyph into the hint *text* so both
+the L and R glyphs sit in one chip; the text glyph must be the same size as the
+auto icon glyph next to it. Lowering the icon (rather than raising the text)
+keeps every footer label at its original size -- only the button glyphs shrink
+slightly, to sit level with their labels.
 
 ## Updating
 

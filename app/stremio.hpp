@@ -3,6 +3,7 @@
 #include <borealis.hpp>
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -157,6 +158,14 @@ void fetchStreamsAsync(const std::string& addonBase, const std::string& type,
                        const std::string& id,
                        std::function<void(StreamsResult)> done);
 
+// A meta catalog ("popular", "top", ...) from an addon (Cinemeta by default):
+// {base}/catalog/{type}/{catalogId}.json. The metas come back as LibItems
+// (id/name/type/poster, no watch state), so the same row builder shows them.
+// Used for the Popular movies / series views.
+void fetchCatalogAsync(const std::string& addonBase, const std::string& type,
+                       const std::string& catalogId,
+                       std::function<void(LibraryResult)> done);
+
 // authKey persistence, so a sign-in survives a restart.
 bool saveAuthKey(const std::string& key);
 std::string loadAuthKey();
@@ -180,6 +189,19 @@ std::string loadEmail();
 // scroll up, and giveFocus() then re-focuses the same row -- a dead end. A
 // custom route is checked on the focused view before any of that.
 void setLibraryUpTarget(brls::View* target);
+
+// Where the library's item count is shown. The tab's header (AppletFrame title)
+// carries it so the count does not eat a row above the list; main.cpp wires this
+// to the frame. Called with the count text on load, or "" to clear it back to a
+// plain title. No-op if never set.
+void setLibraryCountSink(std::function<void(const std::string&)> sink);
+
+// The Stremio tab registers a callback here (constructor) so R/L can cycle its
+// view even when focus is on the header tab bar, which sits outside the tab's
+// view tree. main.cpp registers R/L on the frame and calls cycleActiveView;
+// dir is +1 (R, next) or -1 (L, previous). No-op when no Stremio tab is live.
+void setViewCycler(std::function<void(int)> cycler);
+void cycleActiveView(int dir);
 
 // A blurred, screen-sized-friendly copy of a cached poster, made once and
 // cached next to it. "" if the poster cannot be read.
@@ -231,13 +253,42 @@ class StremioTab : public brls::Box
     StremioTab();
     ~StremioTab() override;
 
+    // Animates the indeterminate loading bar while it is shown.
+    void draw(NVGcontext* vg, float x, float y, float width, float height,
+              brls::Style style, brls::FrameContext* ctx) override;
+
   private:
     void promptEmail();
     void promptPassword();
     void doLogin();
     void onAuthenticated(const std::string& key, bool announce);
     void loadLibrary();
-    void showLibrary(const std::vector<stremio::LibItem>& items);
+
+    // The Stremio tab cycles through these with R. Continue Watching is the
+    // default landing view; Popular pulls Cinemeta's top catalog.
+    enum class View
+    {
+        ContinueWatching = 0,
+        PopularMovies,
+        PopularSeries,
+        Library,
+        COUNT
+    };
+    View view = View::ContinueWatching;
+    void cycleView(int dir);   // R/L: advance/back a view and render it
+    void renderView();         // (re)build the list for the current view
+    void showItems(const std::vector<stremio::LibItem>& items,
+                   const std::string& header, const char* emptyMsg);
+    void loadCatalog(const char* type, std::vector<stremio::LibItem>& cache,
+                     bool& loaded, const std::string& header);
+
+    // The last library fetch, kept so Continue Watching and Library render
+    // without re-hitting the network on every R press.
+    std::vector<stremio::LibItem> libItems;
+    bool libLoaded = false;
+    // Popular catalogs, fetched lazily on first view and cached after.
+    std::vector<stremio::LibItem> popMovies, popSeries;
+    bool popMoviesLoaded = false, popSeriesLoaded = false;
 
     std::string email;
     std::string password;
@@ -250,6 +301,19 @@ class StremioTab : public brls::Box
     brls::Button* loginBtn   = nullptr;
     brls::Label* libStatus   = nullptr;
     brls::Box* libList       = nullptr;
+    brls::ScrollingFrame* libScroll = nullptr;  // to reset the scroll on a view change
+
+    // Centered status/loading overlay: the message label (libStatus) plus an
+    // indeterminate bar shown only while loading (a sliding segment, no percent).
+    brls::Box* loadingBox  = nullptr;
+    brls::Box* loadingBar  = nullptr;   // the track; visible only while loading
+    brls::Box* loadingFill = nullptr;   // the sliding segment
+    void showStatus(const std::string& msg, bool loading);  // centered message +/- bar
+
+    // Set by cycleView so the next showItems lands the cursor on the first row
+    // and scrolls back to the top -- a view change should not keep the old
+    // scroll position or focus deep in the previous list.
+    bool resetOnShow = false;
 
     // Invalidated whenever the list is rebuilt. Poster fetches hold a raw
     // pointer to their Image; clearViews() deletes those, so a fetch that lands
