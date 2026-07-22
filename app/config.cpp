@@ -139,8 +139,6 @@ void load()
     cfg.startupTab = readStr(body, "startupTab", "local") == "stremio"
                          ? Tab::STREMIO
                          : Tab::LOCAL;
-    cfg.tabBar  = readStr(body, "tabBar", "left") == "top" ? TabBar::TOP
-                                                          : TabBar::LEFT;
     cfg.logging = readBool(body, "logging", cfg.logging);
     cfg.hide4k  = readBool(body, "hide4k", cfg.hide4k);
     cfg.rateGovernor = readBool(body, "rateGovernor", cfg.rateGovernor);
@@ -151,10 +149,9 @@ void load()
     cfg.subtitles    = readBool(body, "subtitles", cfg.subtitles);
 
     brls::Logger::info(
-        "[config] startupTab={} tabBar={} logging={} hide4k={} checkUpdates={}",
-        cfg.startupTab == Tab::STREMIO ? "stremio" : "local",
-        cfg.tabBar == TabBar::TOP ? "top" : "left", cfg.logging, cfg.hide4k,
-        cfg.checkUpdates);
+        "[config] startupTab={} logging={} hide4k={} checkUpdates={}",
+        cfg.startupTab == Tab::STREMIO ? "stremio" : "local", cfg.logging,
+        cfg.hide4k, cfg.checkUpdates);
 }
 
 bool save()
@@ -168,7 +165,6 @@ bool save()
     std::fprintf(f,
                  "{\n"
                  "  \"startupTab\": \"%s\",\n"
-                 "  \"tabBar\": \"%s\",\n"
                  "  \"logging\": %s,\n"
                  "  \"hide4k\": %s,\n"
                  "  \"rateGovernor\": %s,\n"
@@ -179,7 +175,6 @@ bool save()
                  "  \"subtitles\": %s\n"
                  "}\n",
                  cfg.startupTab == Tab::STREMIO ? "stremio" : "local",
-                 cfg.tabBar == TabBar::TOP ? "top" : "left",
                  cfg.logging ? "true" : "false", cfg.hide4k ? "true" : "false",
                  cfg.rateGovernor ? "true" : "false",
                  cfg.ramStream ? "true" : "false",

@@ -274,6 +274,37 @@ void setViewCycler(std::function<void(int)> cycler)
     viewCycler = std::move(cycler);
 }
 
+// The header's view tab bar (top-right). The sink, set by main.cpp, highlights
+// the active view (index) or hides the bar (-1); reportView pushes the current
+// view to it. The selector, set by the live tab, lets a header button jump to a
+// view. Mirrors the viewCycler wiring above.
+static std::function<void(int)> viewTabSink;
+static std::function<void(int)> viewSelector;
+
+void setViewTabSink(std::function<void(int)> sink) { viewTabSink = std::move(sink); }
+void setViewSelector(std::function<void(int)> sel) { viewSelector = std::move(sel); }
+
+// Called by the tab whenever its view (or sign-in state) changes; -1 hides the
+// bar. A no-op if the header never registered a sink (e.g. the PC test build).
+static void reportView(int index)
+{
+    if (viewTabSink) viewTabSink(index);
+}
+
+void selectActiveView(int index)
+{
+    if (viewSelector) viewSelector(index);
+}
+
+// Button labels, index-matched to the View enum / cycle order.
+const std::vector<std::string>& viewLabels()
+{
+    static const std::vector<std::string> labels = {
+        "Continue", "Movies", "Shows", "Library", "Search"
+    };
+    return labels;
+}
+
 void cycleActiveView(int dir)
 {
     if (viewCycler) viewCycler(dir);
@@ -989,6 +1020,18 @@ void fetchMetaAsync(const std::string& addonBase, const std::string& type,
         else
         {
             r.ok = true;
+
+            // The descriptive fields live on the "meta" object itself, alongside
+            // the "videos" array. Read them from that block so the flat scanner
+            // does not pick a same-named field out of a nested video.
+            std::string meta = subObject(resp, "meta");
+            const std::string& src = meta.empty() ? resp : meta;
+            r.description = json::str(src, "description");
+            r.releaseInfo = json::str(src, "releaseInfo");
+            if (r.releaseInfo.empty()) r.releaseInfo = json::str(src, "year");
+            r.runtime    = json::str(src, "runtime");
+            r.imdbRating = json::str(src, "imdbRating");
+
             for (const auto& o : json::objects(resp, "videos"))
             {
                 Video v;
@@ -998,6 +1041,10 @@ void fetchMetaAsync(const std::string& addonBase, const std::string& type,
                 v.title   = json::str(o, "title");
                 if (v.title.empty()) v.title = json::str(o, "name");
                 v.thumbnail = json::str(o, "thumbnail");
+                v.released  = json::str(o, "released");
+                if (v.released.empty()) v.released = json::str(o, "firstAired");
+                v.overview  = json::str(o, "overview");
+                if (v.overview.empty()) v.overview = json::str(o, "description");
                 if (v.id.empty()) continue;
                 r.videos.push_back(v);
             }
@@ -1300,6 +1347,16 @@ StremioTab::StremioTab()
         if (!authKey.empty() && libLoaded) cycleView(dir);
     });
 
+    // A header view-bar button jumps straight to that view. Same guard as the
+    // cycler: no-op until the library is up.
+    stremio::setViewSelector([this](int idx) {
+        if (!authKey.empty() && libLoaded)
+            selectView(static_cast<View>(idx));
+    });
+    // Hidden until we render a view: a fresh tab shows the sign-in form, and the
+    // bar has no place on it.
+    stremio::reportView(-1);
+
     // Already signed in from a previous run: skip straight to the library.
     std::string saved = stremio::loadAuthKey();
     if (!saved.empty())
@@ -1315,6 +1372,8 @@ StremioTab::~StremioTab()
     *alive     = false;
     *rowsAlive = false;
     stremio::setViewCycler(nullptr);   // no live tab for the frame's R/L to reach
+    stremio::setViewSelector(nullptr);
+    stremio::reportView(-1);           // fold the header bar away with the tab
     if (focusSubbed)
         brls::Application::getGlobalFocusChangeEvent()->unsubscribe(focusSub);
 }
@@ -1556,11 +1615,25 @@ void StremioTab::cycleView(int dir)
     renderView();
 }
 
+// A header tab-bar pick: jump straight to `v`. Like cycleView but it keeps focus
+// on the header button (suppressFocusMove) so a run of clicks does not bounce in
+// and out of the list, and the slide direction follows the index delta.
+void StremioTab::selectView(View v)
+{
+    if (v == view) return;
+    pendingSlide = static_cast<int>(v) > static_cast<int>(view) ? 1 : -1;
+    view = v;
+    resetOnShow       = true;
+    suppressFocusMove = true;
+    renderView();
+}
+
 // Builds the list for the current view. Continue Watching and Library come from
 // the cached library; the two Popular views pull Cinemeta's top catalog once and
 // cache it, showing a loading line in between.
 void StremioTab::renderView()
 {
+    stremio::reportView(static_cast<int>(view));  // light up the header tab bar
     switch (view)
     {
         case View::ContinueWatching:
@@ -1743,6 +1816,10 @@ void StremioTab::showItems(const std::vector<stremio::LibItem>& items,
         pendingSlide = 0;              // nothing to slide
         libList->setTranslationX(0.0f);
         sliding = false;
+        // No rows to land on, but still clear the one-shot flags so they do not
+        // leak into the next render.
+        resetOnShow       = false;
+        suppressFocusMove = false;
         return;
     }
     // Rows to show: hide the centered overlay entirely.
@@ -1884,8 +1961,10 @@ void StremioTab::finishList(brls::View* lastRow)
         bool parked = !focus || focus == libraryBox || isUnder(focus, loginBox);
         libraryBox->setFocusable(false);
         // resetOnShow (a view change) forces the cursor to the first row and the
-        // list back to the top, regardless of where focus was in the old list.
-        if (parked || resetOnShow)
+        // list back to the top, regardless of where focus was in the old list --
+        // unless suppressFocusMove (a header tab-bar pick) asked to leave focus
+        // where it is, up on the bar.
+        if ((parked || resetOnShow) && !suppressFocusMove)
             brls::Application::giveFocus(libList->getChildren()[0]);
         if (resetOnShow && libScroll)
             libScroll->setContentOffsetY(0.0f, false);
@@ -1894,7 +1973,8 @@ void StremioTab::finishList(brls::View* lastRow)
             libList->getChildren()[0]->setCustomNavigationRoute(
                 brls::FocusDirection::UP, stremio::libraryUpTarget);
     }
-    resetOnShow = false;
+    resetOnShow       = false;
+    suppressFocusMove = false;
 
     // Kick off the horizontal slide-in for a view change.
     if (pendingSlide != 0)

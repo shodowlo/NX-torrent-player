@@ -16,21 +16,10 @@ enum class Tab
     STREMIO = 1,
 };
 
-// Where the category switcher lives.
-enum class TabBar
-{
-    LEFT = 0,  // borealis' sidebar
-    TOP  = 1,  // buttons in the header, top-right
-};
-
 struct Config
 {
     // Which category the browser opens on.
     Tab startupTab = Tab::LOCAL;
-
-    // A row of buttons in the header (default) or borealis' sidebar. The top bar
-    // gives the list the full screen width; the sidebar is the Horizon convention.
-    TabBar tabBar = TabBar::TOP;
 
     // Writes the log to APPDATA_LOG. Off by default: it is unbuffered and the
     // engine dumps a [stats] line every 2s, so it writes to the SD card

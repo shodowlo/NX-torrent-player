@@ -67,22 +67,6 @@ brls::View* SettingsActivity::createContentView()
                   });
     list->addView(startup);
 
-    auto* tabBar = new brls::SelectorCell();
-    tabBar->init("Category bar", { "Left", "Top" },
-                 cfg.tabBar == config::TabBar::TOP ? 1 : 0, [](int sel) {
-                     config::get().tabBar = sel == 1 ? config::TabBar::TOP
-                                                     : config::TabBar::LEFT;
-                     config::save();
-                 });
-    list->addView(tabBar);
-
-    auto* barHint = new brls::Label();
-    barHint->setText("Restart the app to apply.");
-    barHint->setFontSize(15.0f);
-    barHint->setTextColor(nvgRGB(150, 150, 155));
-    barHint->setMargins(12.0f, 20.0f, 18.0f, 20.0f);
-    list->addView(barHint);
-
     auto* logging = new brls::BooleanCell();
     logging->init("Log file", cfg.logging, [](bool on) {
         config::get().logging = on;

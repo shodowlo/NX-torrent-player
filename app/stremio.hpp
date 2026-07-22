@@ -109,6 +109,8 @@ struct Video
     int episode = 0;
     std::string title;
     std::string thumbnail;  // episode still, 16:9, may be empty
+    std::string released;   // air date (ISO) or year, for the episode meta line
+    std::string overview;   // episode synopsis, may be empty
 };
 
 // A playable source for a video.
@@ -132,6 +134,15 @@ struct MetaResult
 {
     bool ok = false;
     std::vector<Video> videos;
+
+    // Descriptive fields from the meta object. A film's detail screen uses them;
+    // the series episode list ignores them (they stay empty if the addon omits
+    // them). runtime is left as the addon wrote it ("127 min"); the UI formats it.
+    std::string description;
+    std::string releaseInfo;  // release year ("2026"), or a span for a series
+    std::string runtime;      // "127 min"
+    std::string imdbRating;   // "7.5"
+
     std::string error;
 };
 struct StreamsResult
@@ -208,6 +219,17 @@ void setLibraryCountSink(std::function<void(const std::string&)> sink);
 void setViewCycler(std::function<void(int)> cycler);
 void cycleActiveView(int dir);
 
+// The header's Stremio view tab bar (top-right). main.cpp builds one button per
+// viewLabels() entry (index-matched to the view cycle order), registers
+// setViewTabSink to highlight the active view -- or hide the whole bar with
+// index -1, used on the Local tab and the sign-in screen -- and calls
+// selectActiveView from a button to jump straight to a view. The live tab drives
+// the highlight and registers the selector.
+const std::vector<std::string>& viewLabels();
+void setViewTabSink(std::function<void(int)> sink);
+void setViewSelector(std::function<void(int)> selector);
+void selectActiveView(int index);
+
 // A blurred, screen-sized-friendly copy of a cached poster, made once and
 // cached next to it. "" if the poster cannot be read.
 std::string blurredPosterPath(const std::string& posterPath);
@@ -281,7 +303,8 @@ class StremioTab : public brls::Box
         COUNT
     };
     View view = View::ContinueWatching;
-    void cycleView(int dir);   // R/L: advance/back a view and render it
+    void cycleView(int dir);       // R/L: advance/back a view and render it
+    void selectView(View v);       // jump straight to a view (header tab bar)
     void renderView();         // (re)build the list for the current view
     void showItems(const std::vector<stremio::LibItem>& items,
                    const std::string& header, const char* emptyMsg);
@@ -328,6 +351,12 @@ class StremioTab : public brls::Box
     // and scrolls back to the top -- a view change should not keep the old
     // scroll position or focus deep in the previous list.
     bool resetOnShow = false;
+
+    // Set by selectView (a header tab-bar pick) so finishList rebuilds the list
+    // and resets the scroll but leaves focus on the header button, instead of
+    // diving into the list the way an R/L cycle does. Lets you click through the
+    // view buttons without being thrown back down each time.
+    bool suppressFocusMove = false;
 
     // Horizontal slide-in when the view changes: cycleView records the direction
     // (R = +1 enters from the right, L = -1 from the left); showItems starts the

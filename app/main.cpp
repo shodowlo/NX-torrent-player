@@ -564,44 +564,34 @@ brls::View* buildTab(config::Tab tab)
                                        : buildLocalTab();
 }
 
-// Categories down the left, in borealis' sidebar. The Horizon convention.
-brls::View* buildBrowserSidebar(brls::AppletFrame* frame)
-{
-    // borealis' default sidebar is 410px, which eats a third of a 1280-wide
-    // screen for two short labels. The space goes to the list instead.
-    //
-    // The width alone is not enough: the sidebar's own padding is 80px left /
-    // 40px right, scaled for those 410. Left as-is it holds the items at the
-    // same offset and leaves ~50px of text lane, so the labels come out
-    // crushed. Shrink the padding to match, keeping ~120px for the longest
-    // label ("Stremio", ~80px at font size 22).
-    // (getStyle() returns a by-value wrapper around the shared metric table,
-    // so writing through a copy is fine.)
-    brls::Style style = brls::Application::getStyle();
-    style.addMetric("brls/tab_frame/sidebar_width", 170.0f);
-    style.addMetric("brls/sidebar/padding_left", 28.0f);
-    style.addMetric("brls/sidebar/padding_right", 20.0f);
-
-    auto* tabs = new brls::TabFrame();
-    tabs->addTab("Local", [frame]() {
-        applyTabIdentity(frame, config::Tab::LOCAL);
-        return buildTab(config::Tab::LOCAL);
-    });
-    tabs->addTab("Stremio", [frame]() {
-        applyTabIdentity(frame, config::Tab::STREMIO);
-        return buildTab(config::Tab::STREMIO);
-    });
-    return tabs;
-}
-
 // Categories as buttons in the header, on the left next to the icon.
 // Hand-built: borealis' TabFrame is sidebar-only.
 void attachTopTabBar(brls::AppletFrame* frame, brls::Box* content)
 {
-    brls::Application::getTheme().setColor(
-        "brls/accent",
-        nvgRGB(0x60, 0x3c, 0xf3)
-    );
+    // The purple used for the active tab (BUTTONSTYLE_PRIMARY reads brls/accent)
+    // and, matching it, the focus highlight -- borealis' default glow is cyan,
+    // which clashes with the purple. color2 is the border stroke, color1 the
+    // pulsating glow; both to the accent gives a clean solid-purple focus. These
+    // are global theme values, so the highlight is purple app-wide.
+    //
+    // Set on BOTH variants: getTheme() returns the light OR dark table depending
+    // on the console's system theme, and drawing may well use the one we did not
+    // touch -- which would keep borealis' default cyan. (That was the bug: only
+    // the startup variant was patched.)
+    NVGcolor accent = nvgRGB(0x60, 0x3c, 0xf3);
+    NVGcolor white  = nvgRGB(0xff, 0xff, 0xff);
+    for (brls::Theme* t : { &brls::Theme::getLightTheme(),
+                            &brls::Theme::getDarkTheme() })
+    {
+        t->addColor("brls/accent", accent);
+        t->addColor("brls/highlight/color1", accent);
+        t->addColor("brls/highlight/color2", accent);
+        // The selected tab is BUTTONSTYLE_PRIMARY: its fill is this color, and
+        // its label goes white so it stays readable on the purple (the dark
+        // theme's default primary text is near-black, made for a light fill).
+        t->addColor("brls/button/primary_enabled_background", accent);
+        t->addColor("brls/button/primary_enabled_text", white);
+    }
     auto* bar = new brls::Box();
     bar->setAxis(brls::Axis::ROW);
     bar->setAlignItems(brls::AlignItems::CENTER);
@@ -656,14 +646,62 @@ void attachTopTabBar(brls::AppletFrame* frame, brls::Box* content)
     });
     bar->addView(stremioBtn);
 
-    // Hard-anchor the switcher in the header's top-left area so it always sits
-    // next to the icon, never in the right hint slot.
+    // The Stremio sub-view switcher, top-right of the header: one button per
+    // view (Continue / Movies / Shows / Library / Search). It says where you are
+    // and clicking one jumps straight there, alongside the L/R cycle. The live
+    // StremioTab drives it -- setViewTabSink highlights the active view, or hides
+    // the whole bar (index -1) on the Local tab and the sign-in screen.
+    auto* viewBar = new brls::Box();
+    viewBar->setAxis(brls::Axis::ROW);
+    viewBar->setAlignItems(brls::AlignItems::CENTER);
+
+    std::vector<brls::Button*> viewBtns;
+    const auto& viewLabels = stremio::viewLabels();
+    for (size_t i = 0; i < viewLabels.size(); i++)
+    {
+        auto* b = new brls::Button();
+        b->setText(viewLabels[i]);
+        b->setStyle(&brls::BUTTONSTYLE_BORDERLESS);
+        if (i) b->setMarginLeft(2.0f);
+        int idx = (int)i;
+        b->registerClickAction([idx](brls::View*) {
+            stremio::selectActiveView(idx);
+            return true;
+        });
+        viewBar->addView(b);
+        viewBtns.push_back(b);
+    }
+
+    // active >= 0: show the bar and mark that view PRIMARY. active < 0: fold it
+    // away and take its buttons out of the focus ring (a GONE box keeps its
+    // children focusable otherwise -- the same trap as the sign-in form).
+    auto applyViewBar = [viewBar, viewBtns](int active) {
+        bool show = active >= 0;
+        viewBar->setVisibility(show ? brls::Visibility::VISIBLE
+                                    : brls::Visibility::GONE);
+        for (size_t i = 0; i < viewBtns.size(); i++)
+        {
+            viewBtns[i]->setFocusable(show);
+            viewBtns[i]->setStyle((int)i == active ? &brls::BUTTONSTYLE_PRIMARY
+                                                   : &brls::BUTTONSTYLE_BORDERLESS);
+        }
+    };
+    applyViewBar(-1);
+    stremio::setViewTabSink(applyViewBar);
+
+    // Hard-anchor both bars in the header: the category switcher top-left, next
+    // to the icon; the Stremio view switcher top-right.
     if (auto* header = frame->getHeader())
     {
         bar->setPositionType(brls::PositionType::ABSOLUTE);
         bar->setPositionLeft(105.0f);
         bar->setPositionTop(20.0f);
         header->addView(bar);
+
+        viewBar->setPositionType(brls::PositionType::ABSOLUTE);
+        viewBar->setPositionRight(30.0f);
+        viewBar->setPositionTop(20.0f);
+        header->addView(viewBar);
     }
 
     // The library list cannot walk focus back out to the header on its own; hand
@@ -676,30 +714,17 @@ void attachTopTabBar(brls::AppletFrame* frame, brls::Box* content)
 brls::View* buildBrowser()
 {
     auto* frame = new BrowserFrame();
-    // TabFrame / our content box are plain Boxes with no header of their own,
-    // so they go inside the AppletFrame that carries the title/icon.
-    bool top = config::get().tabBar == config::TabBar::TOP;
-
+    // Our content box is a plain Box with no header of its own, so it goes
+    // inside the AppletFrame that carries the title/icon.
+    //
     // IMPORTANT: everything touching the header has to happen AFTER
     // pushContentView -- it calls updateAppletFrameItem(), which empties
     // hint_box and resets title/icon to the content view's (blank) ones.
-    if (top)
-    {
-        auto* content = new brls::Box();
-        content->setAxis(brls::Axis::COLUMN);
-        content->setGrow(1.0f);
-        frame->pushContentView(content);
-        attachTopTabBar(frame, content);
-    }
-    else
-    {
-        frame->pushContentView(buildBrowserSidebar(frame));
-        // The sidebar's tab creators set the identity, but focusTab only fires
-        // one when it actually moves the focus -- Local is already focused at 0.
-        applyTabIdentity(frame, config::Tab::LOCAL);
-        if (config::get().startupTab == config::Tab::STREMIO)
-            ((brls::TabFrame*)frame->getContentView())->focusTab(1);
-    }
+    auto* content = new brls::Box();
+    content->setAxis(brls::Axis::COLUMN);
+    content->setGrow(1.0f);
+    frame->pushContentView(content);
+    attachTopTabBar(frame, content);
 
     // Header text/category chip is disabled; only the left-side tab switcher
     // stays in the header.
