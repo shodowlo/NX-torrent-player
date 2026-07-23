@@ -300,7 +300,7 @@ void selectActiveView(int index)
 const std::vector<std::string>& viewLabels()
 {
     static const std::vector<std::string> labels = {
-        "Continue", "Movies", "Shows", "Library", "Search"
+        " Continue", " Movies", " Shows", " Library", " Search"
     };
     return labels;
 }

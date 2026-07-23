@@ -1558,7 +1558,7 @@ class SeriesDetailActivity : public brls::Activity
         cap->setText(std::to_string(v.episode) + " \xC2\xB7 " + t);  // middle dot
         cap->setFontSize(20.0f);
         cap->setSingleLine(true);
-        cap->setWidth(380.0f);  // truncates (and, when focused, scrolls) to here
+        cap->setWidth(320.0f);  // truncates (and, when focused, scrolls) to here
         cap->setMarginBottom(8.0f);
         col->addView(cap);
 
@@ -1566,8 +1566,8 @@ class SeriesDetailActivity : public brls::Activity
         thumb->caption  = cap;  // scroll it while this still is focused
         thumb->progress = progressFor(v);  // drawn by EpisodeThumb::draw
         thumb->setFocusable(true);
-        thumb->setWidth(380.0f);
-        thumb->setHeight(214.0f);  // 16:9
+        thumb->setWidth(320.0f);
+        thumb->setHeight(180.0f);  // 16:9
         thumb->setCornerRadius(10.0f);
         thumb->setBackgroundColor(nvgRGB(0x1a, 0x1a, 0x20));
         stremio::Video ev = v;
@@ -1578,7 +1578,7 @@ class SeriesDetailActivity : public brls::Activity
         thumb->addGestureRecognizer(new brls::TapGestureRecognizer(thumb));
 
         auto* img = new brls::Image();
-        img->setDimensions(380.0f, 214.0f);
+        img->setDimensions(320.0f, 180.0f);
         img->setScalingType(brls::ImageScalingType::FIT);
         img->setCornerRadius(10.0f);  // round the still itself, not just the box
         img->setPositionType(brls::PositionType::ABSOLUTE);

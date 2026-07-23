@@ -629,14 +629,6 @@ void attachTopTabBar(brls::AppletFrame* frame, brls::Box* content)
             false, false, brls::SOUND_BACK);
     };
 
-    localBtn->setText("Local");
-    localBtn->setStyle(&brls::BUTTONSTYLE_BORDERLESS);
-    localBtn->registerClickAction([select](brls::View*) {
-        select(config::Tab::LOCAL);
-        return true;
-    });
-    bar->addView(localBtn);
-
     stremioBtn->setText("Stremio");
     stremioBtn->setStyle(&brls::BUTTONSTYLE_BORDERLESS);
     stremioBtn->setMarginLeft(8.0f);
@@ -645,6 +637,15 @@ void attachTopTabBar(brls::AppletFrame* frame, brls::Box* content)
         return true;
     });
     bar->addView(stremioBtn);
+
+
+    localBtn->setText("Local");
+    localBtn->setStyle(&brls::BUTTONSTYLE_BORDERLESS);
+    localBtn->registerClickAction([select](brls::View*) {
+        select(config::Tab::LOCAL);
+        return true;
+    });
+    bar->addView(localBtn);
 
     // The Stremio sub-view switcher, top-right of the header: one button per
     // view (Continue / Movies / Shows / Library / Search). It says where you are
