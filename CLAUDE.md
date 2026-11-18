@@ -33,6 +33,28 @@ Produces `NX-torrent-player.nro`, which runs from the Homebrew Menu on a CFW
 Switch. On Windows, prefix docker commands with `MSYS_NO_PATHCONV=1` or Git Bash
 rewrites the container paths.
 
+**Switch 2** is a second build, with ouncebrew's devkit (libounce instead of
+libnx, OunceVK for EGL/GL) in a locally built `ounce-devkit` image (see the
+README; clone ounce-devkit with `core.autocrlf=false`) and its own volume:
+`cmake /project -DPLATFORM_SWITCH2=ON -DCMAKE_BUILD_TYPE=Release` in
+`st_build2`. Same build target, but it produces `NX2-torrent-player.nro`. The
+Switch 1 portlibs (mpv, ffmpeg, curl…) are reused; the top-level
+`CMakeLists.txt` swaps any library `portlibs/switch2` also ships (EGL, glapi,
+drm_nouveau) and strips mpv's A57 `-march`/`-mtune`. To check a Switch 2 link,
+grep `link.txt` for `portlibs/switch/lib/libEGL.a`: it must not be there. On
+Switch 2 the window is always 1920x1080 (OunceVK ignores the NWindow crop,
+borealis patch 8), so test docked/handheld with `isDocked()`, never with
+`windowWidth`.
+
+**Releases carry both `.nro`s.** The updater downloads the asset named exactly
+like its own build (`UPDATE_ASSET`, set from `NRO_NAME` in CMake), so keep the
+asset names `NX-torrent-player.nro` and `NX2-torrent-player.nro`. Versions up
+to 0.5.0 (Switch 1 only) take the **first** `.nro` asset the API lists. The API
+lists assets by name, not upload order (checked 2026-11-18 with a draft:
+`NX-torrent-player.nro` uploaded second still came before `NX2-…`), so those
+old Switch 1 installs get the right file. Don't rename the assets to anything
+that sorts before `NX-torrent-player.nro`.
+
 ## Architecture
 
 - `app/` — the UI (C++, borealis): `main` (browser/tabs), `player` (mpv view +

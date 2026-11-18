@@ -106,6 +106,51 @@ invisible however they are sized, since they then match what they travel over.
 
 Both patches are marked with a `LOCAL PATCH` comment in the source.
 
+### 7. `library/cmake/commonOption.cmake` + `library/cmake/toolchain.cmake` — Switch 2 target
+
+A `PLATFORM_SWITCH2` option, for ouncebrew's Switch 2 devkit (libounce +
+OunceVK). It turns `PLATFORM_SWITCH` on, so the rest of borealis builds its
+Switch platform unchanged, and in `toolchain.cmake`:
+
+- `CMAKE_TOOLCHAIN_FILE` is set to `$DEVKITPRO/libounce/cmake/Switch2.cmake`
+  rather than `include()`ing it: try_compile projects re-read the toolchain
+  file, and libounce's Platform file needs the `NX_ROOT` it sets.
+- `CMAKE_C_FLAGS` is **not** set as a normal variable (the Switch 1 branch does):
+  that would shadow the cache entry holding `-mcpu=cortex-a78c` and
+  `-D__SWITCH2__`. The include path goes in
+  `CMAKE_<LANG>_STANDARD_INCLUDE_DIRECTORIES` instead: libounce, then
+  `portlibs/switch2` (OunceVK's EGL/GL headers), then `portlibs/switch`.
+
+borealis links `EGL glapi drm_nouveau nx` by name, which the toolchain's link
+order resolves to OunceVK and libounce. The top-level `CMakeLists.txt` does the
+same for mpv's pkg-config libraries, which CMake otherwise resolves to
+switch-mesa.
+
+Both are marked with a `LOCAL PATCH` comment in the source.
+
+### 8. `library/lib/platforms/glfw/glfw_video.cpp` — Switch 2 always renders at 1080p
+
+switch-glfw renders into a fixed 1920x1080 `NWindow` and, in handheld, shows
+only its 1280x720 corner through `nwindowSetCrop()`. OunceVK presents the whole
+buffer and ignores the crop, so on Switch 2 the UI came out small in the
+bottom-left corner over a grey clear that filled the screen. Under
+`__SWITCH2__`, `beginFrame()` keeps the window at 1920x1080 in both modes,
+which leaves nothing to crop.
+
+The window size no longer changes on docking, so the window-size-changed event
+the app keys its per-mode UI size off no longer fires. `beginFrame()` fires it
+(`Application::onWindowResized`) when `appletGetOperationMode()` changes, and
+the app reads docked/handheld from the operation mode (`isDocked()` in
+`app/settings.cpp`), not from `windowWidth >= 1920`.
+
+Marked with a `LOCAL PATCH` comment in the source.
+
+The same goes for touch, in `library/lib/platforms/switch/switch_input.cpp`:
+HID reports touches in a 1280x720 space, which upstream divides straight by
+`windowScale`, as if they were window pixels. Under `__SWITCH2__` they are first
+scaled by `windowWidth / 1280`, or every tap lands up and left of the finger.
+Also marked `LOCAL PATCH`.
+
 ## Updating
 
 Re-cloning upstream **drops the patch** — re-apply it, and check this file's

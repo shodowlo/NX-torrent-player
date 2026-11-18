@@ -13,6 +13,8 @@
 #include <cctype>
 #include <cstdio>
 
+#include <switch.h>  // appletGetOperationMode (isDocked)
+
 #include "config.hpp"
 #include "theme.hpp"
 #include "update.hpp"
@@ -514,6 +516,11 @@ brls::View* aboutPane()
 
 void setUiScaleHook(std::function<void()> fn) { uiScaleHook = std::move(fn); }
 
+bool isDocked()
+{
+    return appletGetOperationMode() == AppletOperationMode_Console;
+}
+
 void applyUiScale()
 {
     // borealis lays out in a fixed 1280x720 logical space and multiplies it by
@@ -522,7 +529,7 @@ void applyUiScale()
     // content on screen. Widening the logical space shrinks the UI instead; how
     // far is the user's call, separately per mode, since a 1080p TV metres away
     // and a 6" panel at arm's length do not want the same thing.
-    bool docked = brls::Application::windowWidth >= 1920;
+    bool docked = isDocked();
     uint32_t w  = (uint32_t)(docked ? config::get().dockedUiWidth
                                     : config::get().handheldUiWidth);
     uint32_t h  = w * 9 / 16;  // every offered width is 16:9, so this is exact

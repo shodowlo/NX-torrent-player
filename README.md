@@ -2,14 +2,15 @@
 
 # NX Torrent Player
 
-**NX Torrent Player: Stremio on Nintendo Switch**
+**NX Torrent Player: Stremio on Nintendo Switch and Switch 2**
 
 A homebrew video player with a BitTorrent engine built in. It does not download
 a file and then play it: it downloads the pieces it is about to need, in order,
 and starts playing after a few seconds of buffer. Sign in to a Stremio account
 and your library, addons and sources are included too.
 
-> Requires a Switch running custom firmware (Atmosphère).
+> Requires a Switch running custom firmware (Atmosphère), or a Switch 2 running
+> [kaiHEN](https://github.com/ouncebrew/kaihen).
 
 ---
 
@@ -25,6 +26,7 @@ and your library, addons and sources are included too.
 - **Player** — audio/subtitle track menu, analog scrubbing (either stick), touch
   controls, a control lock (Y), and auto-resume where you left off.
 - **borealis** UI: Horizon look, controller-first, touch works too.
+- **Switch 2** — a native build (libounce + OunceVK), not the Switch 1 binary.
 
 ## Screenshots
 
@@ -41,13 +43,18 @@ and your library, addons and sources are included too.
 
 ## Install
 
-1. Download `NX-torrent-player.nro` from the [releases](../../releases), or
-   build it (below).
+1. Download the `.nro` for your console from the [releases](../../releases), or
+   build it (below):
+   - **Switch**: `NX-torrent-player.nro`
+   - **Switch 2**: `NX2-torrent-player.nro`
+
+   They are not interchangeable: each one only runs on its own console.
 2. Put it on your SD card in `/switch/NX-torrent-player/` (create the folder).
-3. Launch it from the **Homebrew Menu**.
+3. Launch it from the **Homebrew Menu** (on Switch 2, the hbmenu kaiHEN opens).
 
 Updating is done from inside the app (Options → Check on startup is on by
-default); it replaces its own .nro and restarts.
+default); it downloads the `.nro` for the console it runs on, replaces itself
+and restarts.
 
 ## Usage
 
@@ -70,8 +77,10 @@ holds several videos, you get to pick which one; if it has no video, it says so.
 
 ### Stremio
 
-In the **Stremio** tab, sign in with your email and password. The session is
-kept and survives a restart (sign out from Options).
+In the **Stremio** tab, sign in with your email and password, or pick **Sign in
+with a QR code** and scan it with a phone already signed in to Stremio (or type
+the 4-character code at link.stremio.com) — no password on the on-screen
+keyboard. The session is kept and survives a restart (sign out from Options).
 
 Pick a title → for a show, a season, then an episode → an addon → a source.
 Sources are whatever your addons return; only BitTorrent ones can be 
@@ -107,6 +116,27 @@ Dependencies come from devkitPro's portlibs (`switch-mpv`, `switch-curl`,
 `switch-libwebp`, `switch-mbedtls`…) and are already in the image. borealis is
 vendored under `library/`.
 
+### Switch 2
+
+The Switch 2 build uses ouncebrew's [devkit](https://github.com/ouncebrew/ounce-devkit)
+(libounce in place of libnx, OunceVK for EGL/OpenGL) and runs from the
+hbmenu that [kaiHEN](https://github.com/ouncebrew/kaihen) launches. It is a
+separate `.nro`: a Switch 1 build does not run on Switch 2, and vice versa.
+Build the devkit's image once, then use a second volume:
+
+```sh
+# the devkit image (clone with LF line endings, or install.sh fails in the container)
+git clone -c core.autocrlf=false https://github.com/ouncebrew/ounce-devkit
+docker build -t ounce-devkit ounce-devkit
+
+# configure once, then build
+docker run --rm -v st_build2:/build -v "$PWD":/project -w /build ounce-devkit \
+    sh -c "cmake /project -DPLATFORM_SWITCH2=ON -DCMAKE_BUILD_TYPE=Release"
+docker run --rm -v st_build2:/build -v "$PWD":/project -w /build ounce-devkit \
+    sh -c "cmake --build . --target NX-torrent-player.nro && \
+           cp NX2-torrent-player.nro /project/"
+```
+
 ## Credits
 
 - [borealis](https://github.com/xfangfang/borealis) — UI framework (vendored,
@@ -119,3 +149,5 @@ vendored under `library/`.
   `assets/cacert.pem`, Mozilla's root store, which is what certificates get
   checked against on a console that mounts none
 - devkitPro / libnx — toolchain
+- [ouncebrew](https://github.com/ouncebrew) — the Switch 2 devkit (libounce,
+  OunceVK) and kaiHEN

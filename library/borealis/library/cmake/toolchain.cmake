@@ -83,9 +83,28 @@ elseif (PLATFORM_SWITCH)
     endif ()
     set(DEVKITPRO $ENV{DEVKITPRO} CACHE BOOL "DEVKITPRO")
     set(__SWITCH__ ON)
-    set(CMAKE_C_FLAGS "-I${DEVKITPRO}/libnx/include -I${DEVKITPRO}/portlibs/switch/include")
-    set(CMAKE_CXX_FLAGS "${CMAKE_C_FLAGS}")
-    include(${DEVKITPRO}/cmake/Switch.cmake REQUIRED)
+    if (PLATFORM_SWITCH2)
+        # LOCAL PATCH: Switch 2 through ouncebrew's devkit (libounce + OunceVK).
+        # Its toolchain swaps libnx for libounce and puts portlibs/switch2
+        # (OunceVK's EGL/glapi/drm_nouveau) ahead of the Switch 1 portlibs.
+        message(STATUS "building for SWITCH 2 (libounce)")
+        # No CMAKE_C_FLAGS here: a normal variable would shadow the cache entry
+        # the toolchain fills (-mcpu=cortex-a78c, -D__SWITCH2__). Its Platform
+        # file puts libounce + portlibs/switch2 in the standard include dirs;
+        # it only fills them when unset, so set them first with the Switch 1
+        # portlibs (GLFW, mpv, curl...) appended, after OunceVK's EGL/GL headers.
+        foreach (lang IN ITEMS C CXX ASM)
+            set(CMAKE_${lang}_STANDARD_INCLUDE_DIRECTORIES
+                "${DEVKITPRO}/libounce/include;${DEVKITPRO}/portlibs/switch2/include;${DEVKITPRO}/portlibs/switch/include" CACHE STRING "")
+        endforeach ()
+        # As the toolchain file, not include()d: try_compile projects re-read
+        # CMAKE_TOOLCHAIN_FILE, and libounce's Platform file needs NX_ROOT.
+        set(CMAKE_TOOLCHAIN_FILE ${DEVKITPRO}/libounce/cmake/Switch2.cmake CACHE PATH "toolchain file" FORCE)
+    else ()
+        set(CMAKE_C_FLAGS "-I${DEVKITPRO}/libnx/include -I${DEVKITPRO}/portlibs/switch/include")
+        set(CMAKE_CXX_FLAGS "${CMAKE_C_FLAGS}")
+        include(${DEVKITPRO}/cmake/Switch.cmake REQUIRED)
+    endif ()
     if (NOT USE_GLFW AND NOT SDL2)
         set(USE_GLFW ON)
     endif ()

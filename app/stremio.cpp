@@ -171,6 +171,10 @@ class SectionActivity : public brls::Activity
 constexpr const char* kCinemeta   = "https://v3-cinemeta.strem.io";
 
 constexpr const char* kLoginUrl   = "https://api.strem.io/api/login";
+constexpr const char* kGetUserUrl = "https://api.strem.io/api/getUser";
+// Stremio's link service (stremio-core's LinkRequest, API v2).
+constexpr const char* kLinkCreateUrl = "https://link.stremio.com/api/v2/create?type=Create";
+constexpr const char* kLinkReadUrl   = "https://link.stremio.com/api/v2/read?type=Read&code=";
 constexpr const char* kLibraryUrl = "https://api.strem.io/api/datastoreGet";
 constexpr const char* kKeyPath    = APPDATA_DIR "/stremio.authkey";
 // Kept next to the key purely so Options can say which account is signed in --
@@ -604,6 +608,73 @@ void loginAsync(const std::string& email, const std::string& password,
             }
         }
         brls::sync([done, r]() { done(r); });
+    });
+}
+
+void createLinkAsync(std::function<void(LinkCode)> done)
+{
+    brls::async([done]() {
+        LinkCode c;
+        std::string resp, err;
+        if (!http::get(kLinkCreateUrl, resp, err))
+        {
+            c.error = err;
+        }
+        else
+        {
+            c.code = json::str(resp, "code");
+            c.link = json::str(resp, "link");
+            std::string qr = json::str(resp, "qrcode");
+            if (c.code.empty() || qr.empty())
+            {
+                std::string msg = json::str(resp, "message");
+                c.error = msg.empty() ? tr("unexpected answer") : msg;
+            }
+            // Stremio renders the QR itself (a 396px PNG with its quiet zone),
+            // so there is no QR encoder to carry here.
+            else if (!http::get(qr, c.qrPng, err, "Accept: image/png"))
+            {
+                c.error = err;
+            }
+            else
+            {
+                c.ok = true;
+            }
+        }
+        brls::Logger::info("[stremio] link code {} ({})", c.code,
+                           c.ok ? "ok" : c.error);
+        brls::sync([done, c]() { done(c); });
+    });
+}
+
+void readLinkAsync(const std::string& code, std::function<void(LoginResult)> done)
+{
+    brls::async([code, done]() {
+        LoginResult r;
+        std::string resp, err;
+        std::string url = std::string(kLinkReadUrl) + http::urlEncode(code);
+        if (!http::get(url, resp, err))
+            r.error = err;
+        else
+        {
+            r.authKey = json::str(resp, "authKey");
+            r.ok      = !r.authKey.empty();
+            if (!r.ok) r.error = json::str(resp, "message");
+        }
+        brls::sync([done, r]() { done(r); });
+    });
+}
+
+void fetchEmailAsync(const std::string& authKey,
+                     std::function<void(std::string)> done)
+{
+    brls::async([authKey, done]() {
+        std::string body = "{\"type\":\"GetUser\",\"authKey\":\"" +
+                           json::escape(authKey) + "\"}";
+        std::string resp, err, email;
+        if (http::postJson(kGetUserUrl, body, resp, err))
+            email = json::str(resp, "email");
+        brls::sync([done, email]() { done(email); });
     });
 }
 
@@ -1923,6 +1994,16 @@ StremioTab::StremioTab()
     loginBtn->registerClickAction([this](brls::View*) { doLogin(); return true; });
     loginBox->addView(loginBtn);
 
+    // The other way in: approve the console from a phone that is already signed
+    // in, instead of typing a password on the on-screen keyboard.
+    auto* qrBtn = new brls::Button();
+    qrBtn->setStyle(&brls::BUTTONSTYLE_BORDERED);
+    qrBtn->setText(tr("Sign in with a QR code"));
+    qrBtn->setWidth(kFormW);
+    qrBtn->setMarginTop(12.0f);
+    qrBtn->registerClickAction([this](brls::View*) { promptQrLogin(); return true; });
+    loginBox->addView(qrBtn);
+
     statusLabel = new brls::Label();
     statusLabel->setText("");
     statusLabel->setFontSize(17.0f);
@@ -2230,6 +2311,164 @@ void StremioTab::doLogin()
         else
             dialog(tr("Sign-in failed: ") + r.error);
     });
+}
+
+namespace
+{
+
+// The QR dialog's content. The dialog deletes it however it goes away -- B,
+// Cancel, or closed on success -- so its destructor is the one reliable "the
+// dialog is gone" signal, and every pending request or timer checks `open`
+// before touching the views below.
+class QrPanel : public brls::Box
+{
+  public:
+    std::shared_ptr<bool> open = std::make_shared<bool>(true);
+    ~QrPanel() override { *open = false; }
+};
+
+struct QrSession
+{
+    std::shared_ptr<bool> open;
+    brls::Dialog* dialog = nullptr;
+    brls::Image* qr      = nullptr;
+    brls::Label* code    = nullptr;
+    brls::Label* status  = nullptr;
+    std::string current;  // the code on screen
+    std::chrono::steady_clock::time_point born;
+    std::function<void(std::string)> onKey;  // approved: the account's authKey
+};
+
+// How often to ask whether the phone has approved the code, and when to swap it
+// for a fresh one. The service answers "invalid or expired" both while a code
+// waits and once it has expired, so its age is the only way to know. A code
+// lives about 5 minutes (measured 2026-11-18: valid at 300s, expired by 315s);
+// renewing at 4 leaves a minute's margin for a scan already under way.
+constexpr long kQrPollMs      = 3000;
+constexpr int  kQrLifetimeSec = 240;
+
+void qrPoll(std::shared_ptr<QrSession> s);
+
+void qrRequest(std::shared_ptr<QrSession> s)
+{
+    s->status->setText(tr("Getting a code..."));
+    stremio::createLinkAsync([s](stremio::LinkCode c) {
+        if (!*s->open) return;
+        if (!c.ok)
+        {
+            // Offline, or the service is down: say so and try again shortly,
+            // rather than leaving a dead QR up.
+            s->status->setText(tr("Could not get a code: ") + c.error);
+            brls::delay(5000, [s]() {
+                if (*s->open) qrRequest(s);
+            });
+            return;
+        }
+        s->current = c.code;
+        s->born    = std::chrono::steady_clock::now();
+        s->qr->setImageFromMem((const unsigned char*)c.qrPng.data(),
+                               (int)c.qrPng.size());
+        s->code->setText(c.code);
+        s->status->setText(tr("Waiting for your phone..."));
+        brls::delay(kQrPollMs, [s]() { qrPoll(s); });
+    });
+}
+
+void qrPoll(std::shared_ptr<QrSession> s)
+{
+    if (!*s->open) return;
+    auto age = std::chrono::steady_clock::now() - s->born;
+    if (age > std::chrono::seconds(kQrLifetimeSec))
+    {
+        qrRequest(s);
+        return;
+    }
+    std::string code = s->current;
+    stremio::readLinkAsync(code, [s, code](stremio::LoginResult r) {
+        // A reply for a code we have since replaced is stale either way.
+        if (!*s->open || code != s->current) return;
+        if (r.ok)
+        {
+            auto cb  = s->onKey;
+            auto key = r.authKey;
+            s->dialog->close([cb, key]() { cb(key); });
+            return;
+        }
+        brls::delay(kQrPollMs, [s]() { qrPoll(s); });
+    });
+}
+
+} // namespace
+
+void StremioTab::promptQrLogin()
+{
+    auto* panel = new QrPanel();
+    panel->setAxis(brls::Axis::COLUMN);
+    panel->setAlignItems(brls::AlignItems::CENTER);
+    panel->setPadding(26.0f, 50.0f, 22.0f, 50.0f);
+    // A modal needs a focus target; this one is not meant to look focused.
+    panel->setFocusable(true);
+    panel->setHideHighlight(true);
+
+    auto* title = new brls::Label();
+    title->setText(tr("Scan with a phone signed in to Stremio"));
+    title->setFontSize(22.0f);
+    title->setTextColor(theme::text());
+    title->setHorizontalAlign(brls::HorizontalAlign::CENTER);
+    panel->addView(title);
+
+    // NEAREST: the QR is a grid of hard-edged modules, and smoothing them while
+    // scaling 396px down blurs the edges a phone camera locks onto.
+    auto* qr = new brls::Image();
+    qr->setDimensions(250.0f, 250.0f);
+    qr->setScalingType(brls::ImageScalingType::FIT);
+    qr->setInterpolation(brls::ImageInterpolation::NEAREST);
+    qr->setMargins(18.0f, 0.0f, 14.0f, 0.0f);
+    panel->addView(qr);
+
+    auto* how = new brls::Label();
+    how->setText(tr("Or open link.stremio.com and enter this code:"));
+    how->setFontSize(17.0f);
+    how->setTextColor(theme::textMuted());
+    how->setHorizontalAlign(brls::HorizontalAlign::CENTER);
+    panel->addView(how);
+
+    auto* code = new brls::Label();
+    code->setText("...");
+    code->setFontSize(34.0f);
+    code->setTextColor(theme::text());
+    code->setHorizontalAlign(brls::HorizontalAlign::CENTER);
+    code->setMarginTop(4.0f);
+    panel->addView(code);
+
+    auto* status = new brls::Label();
+    status->setText("");
+    status->setFontSize(16.0f);
+    status->setTextColor(theme::textMuted());
+    status->setHorizontalAlign(brls::HorizontalAlign::CENTER);
+    status->setHeight(24.0f);  // fixed, so a status change does not reflow
+    status->setMarginTop(8.0f);
+    panel->addView(status);
+
+    auto* d = new brls::Dialog(panel);
+    d->addButton(tr("Cancel"), []() {});
+    d->open();
+
+    auto s    = std::make_shared<QrSession>();
+    s->open   = panel->open;
+    s->dialog = d;
+    s->qr     = qr;
+    s->code   = code;
+    s->status = status;
+    s->onKey  = [this, live = alive](std::string key) {
+        if (!*live) return;
+        onAuthenticated(key, true);
+        // Options shows who is signed in; nobody typed an email this time.
+        stremio::fetchEmailAsync(key, [](std::string email) {
+            if (!email.empty()) stremio::saveEmail(email);
+        });
+    };
+    qrRequest(s);
 }
 
 void StremioTab::onAuthenticated(const std::string& key, bool announce)

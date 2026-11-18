@@ -13,6 +13,12 @@ option(PLATFORM_ANDROID "build for Android" OFF)
 option(PLATFORM_PSV "build for psv" OFF)
 option(PLATFORM_PS4 "build for ps4" OFF)
 option(PLATFORM_SWITCH "build for switch" OFF)
+# LOCAL PATCH: Switch 2 (ouncebrew devkit). It is a Switch build in every other
+# respect, so it turns PLATFORM_SWITCH on.
+option(PLATFORM_SWITCH2 "build for switch 2 (ouncebrew libounce)" OFF)
+if (PLATFORM_SWITCH2)
+    set(PLATFORM_SWITCH ON CACHE BOOL "build for switch" FORCE)
+endif ()
 
 # OpenGL options
 option(USE_EGL "Using EGL instead of native GL." OFF)

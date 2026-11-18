@@ -1,6 +1,7 @@
 # Build output
 /build/
 /NX-torrent-player.nro
+/NX2-torrent-player.nro
 /.updatetest/
 /NX-torrent-player.elf
 /NX-torrent-player.nacp

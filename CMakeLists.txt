@@ -33,6 +33,15 @@ set(PROJECT_TITLEID "0x010000000000A123")
 set(UPDATE_REPO "shodowlo/NX-torrent-player" CACHE STRING "GitHub owner/name for updates")
 set(UPDATE_API_URL "https://api.github.com/repos/${UPDATE_REPO}/releases/latest"
     CACHE STRING "Release API endpoint the updater polls")
+
+# The .nro's file name, which is also the release asset the updater downloads:
+# a release carries one .nro per console, and each build must pick its own --
+# a Switch 1 binary does not run on Switch 2, nor the other way round.
+if (PLATFORM_SWITCH2)
+    set(NRO_NAME "NX2-torrent-player")
+else ()
+    set(NRO_NAME "NX-torrent-player")
+endif ()
 set(PROJECT_ICON ${CMAKE_CURRENT_SOURCE_DIR}/assets/icon.jpg)
 set(PROJECT_RESOURCES ${CMAKE_CURRENT_SOURCE_DIR}/library/borealis/resources)
 
@@ -48,6 +57,34 @@ pkg_check_modules(CURL REQUIRED IMPORTED_TARGET libcurl)
 # Metahub serves some Stremio posters as WebP, which nanovg's stb_image cannot
 # decode; libwebp lets us convert them (see app/stremio.cpp).
 pkg_check_modules(WEBP REQUIRED IMPORTED_TARGET libwebp)
+
+# Switch 2 (-DPLATFORM_SWITCH2=ON, ouncebrew devkit): the portlibs above are the
+# Switch 1 ones, and their .pc files carry two Switch 1 leftovers to undo:
+# - CMake resolves every -l against the .pc's own libdir (portlibs/switch), so
+#   mpv would drag in switch-mesa's libEGL/libglapi/libdrm_nouveau (Maxwell
+#   nouveau) next to OunceVK's. Any library portlibs/switch2 also ships is
+#   swapped for its Switch 2 copy -- the order switch2vars.sh/switch2_rules use.
+# - mpv's Cflags hard-code -march=armv8-a -mtune=cortex-a57, which would
+#   override the toolchain's -mcpu=cortex-a78c.
+if (PLATFORM_SWITCH2)
+    foreach (pkg MPV CURL WEBP)
+        get_target_property(_libs PkgConfig::${pkg} INTERFACE_LINK_LIBRARIES)
+        set(_fixed "")
+        foreach (_lib IN LISTS _libs)
+            get_filename_component(_name "${_lib}" NAME)
+            if (IS_ABSOLUTE "${_lib}" AND EXISTS "${DEVKITPRO}/portlibs/switch2/lib/${_name}")
+                set(_lib "${DEVKITPRO}/portlibs/switch2/lib/${_name}")
+            endif ()
+            list(APPEND _fixed "${_lib}")
+        endforeach ()
+        set_target_properties(PkgConfig::${pkg} PROPERTIES INTERFACE_LINK_LIBRARIES "${_fixed}")
+        get_target_property(_opts PkgConfig::${pkg} INTERFACE_COMPILE_OPTIONS)
+        if (_opts)
+            list(FILTER _opts EXCLUDE REGEX "^-m(arch|tune|cpu)=")
+            set_target_properties(PkgConfig::${pkg} PROPERTIES INTERFACE_COMPILE_OPTIONS "${_opts}")
+        endif ()
+    endforeach ()
+endif ()
 
 # UI (app/, C++) + our torrent engine (engine/, C).
 file(GLOB_RECURSE MAIN_SRC ${CMAKE_CURRENT_SOURCE_DIR}/app/*.cpp)
@@ -82,7 +119,8 @@ target_compile_options(${PROJECT_NAME} PRIVATE -Wformat -Werror=format)
 # Options, and is what the updater compares against the latest tag.
 target_compile_definitions(${PROJECT_NAME} PRIVATE
     APP_VERSION="${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_ALTER}"
-    UPDATE_API_URL="${UPDATE_API_URL}")
+    UPDATE_API_URL="${UPDATE_API_URL}"
+    UPDATE_ASSET="${NRO_NAME}.nro")
 
 if (PLATFORM_SWITCH)
     # Bundle borealis' resources into the nro's romfs (borealis reads them from
@@ -116,7 +154,7 @@ if (PLATFORM_SWITCH)
         # curl.se/ca). The console mounts none, so it has to ride in the romfs --
         # refresh it from there when roots rotate. See app/http.cpp.
         COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/assets/cacert.pem ${CMAKE_BINARY_DIR}/resources/cacert.pem
-        COMMAND ${NX_ELF2NRO_EXE} ${PROJECT_NAME}.elf ${PROJECT_NAME}.nro --icon=${PROJECT_ICON} --nacp=${PROJECT_NAME}.nacp --romfsdir=${CMAKE_BINARY_DIR}/resources
+        COMMAND ${NX_ELF2NRO_EXE} ${PROJECT_NAME}.elf ${NRO_NAME}.nro --icon=${PROJECT_ICON} --nacp=${PROJECT_NAME}.nacp --romfsdir=${CMAKE_BINARY_DIR}/resources
     )
 
 endif ()

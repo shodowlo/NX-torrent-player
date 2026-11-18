@@ -50,6 +50,10 @@ std::unique_ptr<brls::D3D11Context> D3D11_CONTEXT;
 #endif
 #endif
 
+#ifdef __SWITCH2__
+#include <switch.h>  // LOCAL PATCH: appletGetOperationMode, see beginFrame()
+#endif
+
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -410,7 +414,30 @@ GLFWVideoContext::GLFWVideoContext(const std::string& windowTitle, uint32_t wind
 
 void GLFWVideoContext::beginFrame()
 {
-#ifdef __SWITCH__
+#ifdef __SWITCH2__
+    // LOCAL PATCH: switch-glfw renders into a fixed 1920x1080 NWindow and, in
+    // handheld (1280x720), shows only that corner through nwindowSetCrop().
+    // OunceVK presents the whole buffer and ignores the crop, so the UI came out
+    // small in the bottom-left over a full-screen clear. Always use the full
+    // buffer: nothing to crop, borealis scales the UI to 1080p.
+    // The size no longer follows docking, so docking no longer fires the
+    // window-size-changed event the app keys its per-mode UI size off: fire it
+    // on a mode change instead.
+    static int oldMode = -1;
+    int mode           = (int)appletGetOperationMode();
+    if (oldWidth != 1920 || oldHeight != 1080)
+    {
+        oldWidth  = 1920;
+        oldHeight = 1080;
+
+        glfwSetWindowSize(window, 1920, 1080);
+    }
+    else if (oldMode != -1 && mode != oldMode)
+    {
+        Application::onWindowResized(1920, 1080);
+    }
+    oldMode = mode;
+#elif defined(__SWITCH__)
     const GLFWvidmode* r = glfwGetVideoMode(monitor);
 
     if (oldWidth != r->width || oldHeight != r->height)

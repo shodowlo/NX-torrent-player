@@ -142,12 +142,13 @@ void checkAsync(std::function<void(Release)> done)
 
         // The .nro asset. The release also carries the zip for manual installs;
         // downloading that would mean pulling the same bytes to then unpack one
-        // file out of them.
+        // file out of them. A release ships one .nro per console, so match this
+        // build's exact name (UPDATE_ASSET, from CMake) -- "any .nro" would hand
+        // a Switch 2 the Switch 1 binary, which does not run there. No match
+        // means no update, never a guess.
         for (const auto& a : json::objects(resp, "assets"))
         {
-            std::string name = json::str(a, "name");
-            if (name.size() < 4 || name.compare(name.size() - 4, 4, ".nro") != 0)
-                continue;
+            if (json::str(a, "name") != UPDATE_ASSET) continue;
             r.url  = json::str(a, "browser_download_url");
             r.size = json::integer(a, "size");
             break;
@@ -159,7 +160,8 @@ void checkAsync(std::function<void(Release)> done)
                            r.url.empty() ? "(none)" : r.url);
         if (r.newer && r.url.empty())
             brls::Logger::warning(
-                "[update] release {} is newer but ships no .nro asset", tag);
+                "[update] release {} is newer but ships no {} asset", tag,
+                UPDATE_ASSET);
 
         brls::sync([done, r]() { done(r); });
     });

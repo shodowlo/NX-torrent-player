@@ -24,6 +24,11 @@ class AccountActivity : public brls::Activity
 // window exists, on every window-size change, and after the setting is edited.
 void applyUiScale();
 
+// Whether the console is docked, from the applet's operation mode. Not from the
+// window width: on Switch 2 the app always renders at 1080p (see the LOCAL PATCH
+// in borealis' glfw_video.cpp), handheld included.
+bool isDocked();
+
 // Run after applyUiScale has actually changed the logical space -- for whatever
 // has to be recomputed from it and cannot hear about it otherwise: the size
 // change comes from setWindowSize, which does NOT fire the window-size-changed

@@ -277,13 +277,23 @@ void SwitchInputManager::updateTouchStates(std::vector<RawTouchState>* states)
 
     if (hidGetTouchScreenStates(&hidState, 1))
     {
+#ifdef __SWITCH2__
+        // LOCAL PATCH: HID reports touches in a 1280x720 space, which upstream
+        // takes as window pixels -- true on Switch 1, where the touchscreen only
+        // works handheld, at 1280x720. Switch 2 always renders at 1920x1080 (see
+        // glfw_video.cpp), so map to window pixels first or every tap lands up
+        // and left of the finger.
+        const float touchToWindow = Application::windowWidth / 1280.0f;
+#else
+        const float touchToWindow = 1.0f;
+#endif
         for (int i = 0; i < hidState.count; i++)
         {
             RawTouchState state;
             state.pressed    = true;
             state.fingerId   = hidState.touches[i].finger_id;
-            state.position.x = hidState.touches[i].x / Application::windowScale;
-            state.position.y = hidState.touches[i].y / Application::windowScale;
+            state.position.x = hidState.touches[i].x * touchToWindow / Application::windowScale;
+            state.position.y = hidState.touches[i].y * touchToWindow / Application::windowScale;
             states->push_back(state);
         }
     }

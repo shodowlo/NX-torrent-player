@@ -1529,7 +1529,7 @@ void attachTopTabBar(brls::AppletFrame* frame, brls::Box* content)
     // is stored per mode, hence the docked check -- and hence recomputing this
     // when the console is docked or undocked.
     auto insetViewBar = [viewBar]() {
-        bool docked = brls::Application::windowWidth >= 1920;
+        bool docked = isDocked();
         int  w      = docked ? config::get().dockedUiWidth
                              : config::get().handheldUiWidth;
         viewBar->setPositionLeft(w <= config::kDefaultHandheldUiWidth ? 120.0f

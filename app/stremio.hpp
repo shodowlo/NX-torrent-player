@@ -186,6 +186,28 @@ struct StreamsResult
 // keep drawing.
 void loginAsync(const std::string& email, const std::string& password,
                 std::function<void(LoginResult)> done);
+
+// QR sign-in, through Stremio's link service (link.stremio.com, what its TV apps
+// use): createLinkAsync gets a short code plus a QR of the page that approves
+// it; the user scans it with a phone that is signed in, and readLinkAsync --
+// polled -- returns the account's authKey once they have.
+struct LinkCode
+{
+    bool ok = false;
+    std::string code;   // "MW3U": typed at link.stremio.com without the QR
+    std::string link;   // https://link.stremio.com/MW3U, what the QR encodes
+    std::string qrPng;  // the QR as PNG bytes, from Stremio's own renderer
+    std::string error;  // set when !ok
+};
+void createLinkAsync(std::function<void(LinkCode)> done);
+// ok + authKey once the code has been approved. Not ok while it is still
+// waiting -- the service answers "invalid or expired" for both, so the caller
+// tells them apart by the code's age, not by this.
+void readLinkAsync(const std::string& code, std::function<void(LoginResult)> done);
+// The account's email, for the "signed in as" line in Options: a QR sign-in
+// never sees it typed. "" on failure.
+void fetchEmailAsync(const std::string& authKey,
+                     std::function<void(std::string)> done);
 void fetchLibraryAsync(const std::string& authKey,
                        std::function<void(LibraryResult)> done);
 void fetchAddonsAsync(const std::string& authKey,
@@ -392,6 +414,9 @@ class StremioTab : public brls::Box
     brls::Box* loginField(const char* caption, const char* placeholder,
                           std::function<void()> onPress, brls::Label** value);
     void doLogin();
+    // The QR sign-in dialog: shows a link code as a QR and polls until a phone
+    // approves it (see stremio::createLinkAsync).
+    void promptQrLogin();
     void onAuthenticated(const std::string& key, bool announce);
     void loadLibrary();
 
